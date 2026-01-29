@@ -45,12 +45,12 @@ To build Lux Editor from source, you'll need to have Rust installed. If you don'
 - Middle-click on tab - Close tab
 
 #### Editing
-- `Ctrl+Z` - Undo
-- `Ctrl+Y` or `Ctrl+Shift+Z` - Redo
-- `Ctrl+A` - Select all
-- `Ctrl+C` - Copy
-- `Ctrl+X` - Cut
-- `Ctrl+V` - Paste
+- `Ctrl+Z` (or `Cmd+Z` on macOS) - Undo
+- `Ctrl+Y` or `Ctrl+Shift+Z` (or `Cmd+Y` or `Cmd+Shift+Z` on macOS) - Redo
+- `Ctrl+A` (or `Cmd+A` on macOS) - Select all
+- `Ctrl+C` (or `Cmd+C` on macOS) - Copy
+- `Ctrl+X` (or `Cmd+X` on macOS) - Cut
+- `Ctrl+V` (or `Cmd+V` on macOS) - Paste
 
 #### Navigation
 - `Ctrl+F` (or `Cmd+F` on macOS) - Find
