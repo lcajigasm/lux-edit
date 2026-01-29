@@ -54,7 +54,7 @@ To build Lux Editor from source, you'll need to have Rust installed. If you don'
 
 #### Navigation
 - `Ctrl+F` (or `Cmd+F` on macOS) - Find
-- `Ctrl+H` (or `Cmd+H` on macOS) - Find and replace
+- `Ctrl+H` (or `Cmd+H` on macOS) - Find and replace (Note: On macOS, `Cmd+H` hides the window, use Command Palette instead)
 - `Ctrl+G` (or `Cmd+G` on macOS) - Go to line
 - `Esc` - Close search/replace/go-to-line bar
 
@@ -83,7 +83,7 @@ Contributions are welcome! If you'd like to contribute to Lux Editor:
 
 ## License
 
-This project is licensed under the MIT License. See the Cargo.toml file for details.
+This project is licensed under the MIT License.
 
 ## Acknowledgments
 
