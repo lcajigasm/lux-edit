@@ -1,0 +1,13 @@
+[package]
+name = "lux-edit"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, free text editor inspired by Sublime Text"
+license = "MIT"
+
+[dependencies]
+eframe = "0.29"
+ropey = "1.6"
+rfd = "0.15"
+arboard = "3.4"
+syntect = "5.2"
