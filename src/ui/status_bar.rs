@@ -2,12 +2,21 @@ use eframe::egui;
 
 use crate::editor::Editor;
 
-const BAR_HEIGHT: f32 = 24.0;
-const BAR_BG: egui::Color32 = egui::Color32::from_rgb(53, 54, 56);
-const BAR_TEXT: egui::Color32 = egui::Color32::from_rgb(220, 220, 220);
-const BAR_BORDER: egui::Color32 = egui::Color32::from_rgb(30, 30, 30);
+const BAR_HEIGHT: f32 = 22.0;
+const BAR_ITEM_HOVER_ALPHA: u8 = 30;
 
-pub fn show(ui: &mut egui::Ui, editor: &Editor) {
+const BAR_BG: egui::Color32 = egui::Color32::from_rgb(0, 122, 204); // VS Code Blue for status bar
+const BAR_TEXT: egui::Color32 = egui::Color32::WHITE;
+
+#[derive(Clone, Debug, Default)]
+pub struct GitInfo {
+    pub branch: String,
+    pub ahead: usize,
+    pub behind: usize,
+    pub dirty: bool,
+}
+
+pub fn show(ui: &mut egui::Ui, editor: &Editor, git_info: Option<&GitInfo>) {
     let rect = ui.available_rect_before_wrap();
     let bar_rect = egui::Rect::from_min_size(
         egui::Pos2::new(rect.left(), rect.bottom() - BAR_HEIGHT),
@@ -15,67 +24,81 @@ pub fn show(ui: &mut egui::Ui, editor: &Editor) {
     );
 
     ui.painter().rect_filled(bar_rect, 0.0, BAR_BG);
-    ui.painter().line_segment(
-        [
-            egui::Pos2::new(bar_rect.left(), bar_rect.top()),
-            egui::Pos2::new(bar_rect.right(), bar_rect.top()),
-        ],
-        egui::Stroke::new(1.0, BAR_BORDER),
+    
+    // Allocate the area
+    let mut ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(bar_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center))
     );
-    ui.allocate_rect(bar_rect, egui::Sense::hover());
+    ui.spacing_mut().item_spacing = egui::Vec2::new(0.0, 0.0);
+    
+    // Left Side (Git)
+    if let Some(info) = git_info {
+        let mut status = info.branch.clone();
+        if info.dirty {
+            status.push('*');
+        }
+        if info.ahead > 0 {
+            status.push_str(&format!(" ↑{}", info.ahead));
+        }
+        if info.behind > 0 {
+            status.push_str(&format!(" ↓{}", info.behind));
+        }
+        
+        status_item(&mut ui, &format!("\u{E0A0} {}", status)); //  branch symbol (requires nerd font, fallback text)
+        // Note: \u{E0A0} is Nerd Font git branch. 
+        // If not available, we can use "git: "
+    }
 
-    let primary = &editor.cursors[0];
+    // Spacer
+    ui.label(""); 
 
-    // Left side: file info
-    let file_info = if let Some(path) = &editor.file_path {
-        path.to_string_lossy().to_string()
-    } else {
-        "Untitled".into()
-    };
+    // Right Side
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // Cursor Position
+        let primary = &editor.cursors[0];
+        let cursor_text = if editor.cursors.len() > 1 {
+            format!("Ln {}, Col {} ({} cursors)", primary.pos.line + 1, primary.pos.col + 1, editor.cursors.len())
+        } else {
+            format!("Ln {}, Col {}", primary.pos.line + 1, primary.pos.col + 1)
+        };
+        status_item(ui, &cursor_text);
 
-    let modified_marker = if editor.modified { " [Modified]" } else { "" };
+        // Encoding / Spaces
+        status_item(ui, "UTF-8"); // Placeholder
+        status_item(ui, "Spaces: 4"); // Placeholder
 
-    ui.painter().text(
-        egui::Pos2::new(bar_rect.left() + 12.0, bar_rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        format!("{}{}", file_info, modified_marker),
-        egui::FontId::proportional(12.0),
-        BAR_TEXT,
+        // Language
+         let syntax = editor
+            .file_path
+            .as_ref()
+            .and_then(|p| p.extension().and_then(|e| e.to_str()))
+            .map(|ext| ext.to_uppercase())
+            .unwrap_or_else(|| "PLAIN TEXT".into());
+        status_item(ui, &syntax);
+    });
+}
+
+fn status_item(ui: &mut egui::Ui, text: &str) {
+    let font = egui::FontId::proportional(12.0);
+    let text_color = BAR_TEXT;
+    
+    // Calculate size
+    let padding = egui::vec2(10.0, 0.0);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), text_color);
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::Vec2::new(galley.rect.width() + padding.x * 2.0, BAR_HEIGHT),
+        egui::Sense::click()
     );
-
-    // Middle: syntax / encoding info similar to Sublime
-    let syntax = editor
-        .file_path
-        .as_ref()
-        .and_then(|p| p.extension().and_then(|e| e.to_str()))
-        .map(|ext| ext.to_uppercase())
-        .unwrap_or_else(|| "PLAIN TEXT".into());
-    let center_info = format!("{}   UTF-8   Spaces: 4", syntax);
-    ui.painter().text(
-        egui::Pos2::new(bar_rect.center().x, bar_rect.center().y),
-        egui::Align2::CENTER_CENTER,
-        center_info,
-        egui::FontId::proportional(11.0),
-        egui::Color32::from_rgb(190, 190, 190),
-    );
-
-    // Right side: cursor position + cursor count
-    let cursor_info = if editor.cursors.len() > 1 {
-        format!(
-            "Ln {}, Col {} ({} cursors)",
-            primary.pos.line + 1,
-            primary.pos.col + 1,
-            editor.cursors.len()
-        )
-    } else {
-        format!("Ln {}, Col {}", primary.pos.line + 1, primary.pos.col + 1)
-    };
-
-    ui.painter().text(
-        egui::Pos2::new(bar_rect.right() - 12.0, bar_rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        cursor_info,
-        egui::FontId::proportional(12.0),
-        BAR_TEXT,
+    
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_white_alpha(BAR_ITEM_HOVER_ALPHA));
+    }
+    
+    ui.painter().galley(
+        egui::Pos2::new(rect.left() + padding.x, rect.center().y - galley.rect.height() / 2.0), 
+        galley,
+        text_color
     );
 }

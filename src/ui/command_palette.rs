@@ -75,6 +75,16 @@ impl CommandPalette {
                     shortcut: "Ctrl+A".into(),
                     id: CommandId::SelectAll,
                 },
+                Command {
+                    name: "Undo".into(),
+                    shortcut: "Ctrl+Z".into(),
+                    id: CommandId::Undo,
+                },
+                Command {
+                    name: "Redo".into(),
+                    shortcut: "Ctrl+Shift+Z".into(),
+                    id: CommandId::Redo,
+                },
             ],
         }
     }

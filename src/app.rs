@@ -14,25 +14,19 @@ const MENU_STROKE: egui::Stroke = egui::Stroke {
     width: 1.0,
     color: egui::Color32::from_rgb(65, 65, 67),
 };
-const TAB_BAR_BG: egui::Color32 = egui::Color32::from_rgb(33, 35, 37);
-const TAB_BAR_BORDER: egui::Color32 = egui::Color32::from_rgb(25, 26, 28);
-const TAB_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(50, 52, 56);
-const TAB_INACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(40, 41, 44);
-const TAB_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(47, 49, 53);
-const TAB_HEIGHT: f32 = 28.0;
-const TAB_MIN_WIDTH: f32 = 100.0;
-const TAB_MAX_WIDTH: f32 = 200.0;
-const TAB_PADDING_X: f32 = 14.0;
-const TAB_CLOSE_SIZE: f32 = 12.0;
-const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 149, 89);
+const TAB_BAR_BG: egui::Color32 = egui::Color32::from_rgb(25, 25, 26);
+const TAB_BAR_BORDER: egui::Color32 = egui::Color32::from_rgb(0, 0, 0); // Clear separation
+const TAB_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 38); // Should match generic editor bg
+const TAB_INACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 48);
+const TAB_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(50, 50, 53);
+const TAB_HEIGHT: f32 = 32.0; // Slightly taller for modern feel
+const TAB_MIN_WIDTH: f32 = 120.0;
+const TAB_MAX_WIDTH: f32 = 220.0;
+const TAB_PADDING_X: f32 = 12.0;
+const TAB_CLOSE_SIZE: f32 = 14.0;
+const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 122, 204); // VS Code-ish blue active line
 
-#[derive(Clone, Debug, Default)]
-struct GitInfo {
-    branch: String,
-    ahead: usize,
-    behind: usize,
-    dirty: bool,
-}
+// GitInfo moved to ui::status_bar
 
 #[derive(Clone, Copy)]
 enum TabAction {
@@ -63,7 +57,7 @@ pub struct LuxApp {
     pub closed_tabs: Vec<Editor>,
     pub dragging_tab: Option<usize>,
     pub editor_theme: EditorThemeKind,
-    git_info: Option<GitInfo>,
+    git_info: Option<crate::ui::status_bar::GitInfo>,
     git_last_check: f64,
 }
 
@@ -497,8 +491,7 @@ impl LuxApp {
     fn show_tab_bar(&mut self, ui: &mut egui::Ui) {
         egui::Frame::none()
             .fill(TAB_BAR_BG)
-            .stroke(egui::Stroke::new(1.0, TAB_BAR_BORDER))
-            .inner_margin(egui::Margin::symmetric(8.0, 2.0))
+            .inner_margin(egui::Margin::same(0.0)) // No margin, full bleed
             .show(ui, |ui| {
                 let mut tab_rects: Vec<(usize, egui::Rect, bool)> = Vec::new();
                 let mut tab_action: Option<TabAction> = None;
@@ -506,11 +499,15 @@ impl LuxApp {
                 let pointer_released = ui.ctx().input(|i| i.pointer.any_released());
 
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::ZERO; // Connect tabs
+
                     egui::ScrollArea::horizontal()
                         .id_salt("tabs_scroll")
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing = egui::Vec2::new(1.0, 0.0); // 1px gap
+
                                 for i in 0..self.editors.len() {
                                     let (title, modified, pinned) = {
                                         let editor = &self.editors[i];
@@ -520,28 +517,35 @@ impl LuxApp {
                                     let text = title.clone();
 
                                     let text_color = if is_active {
-                                        egui::Color32::from_rgb(230, 230, 230)
+                                        egui::Color32::WHITE
                                     } else {
-                                        egui::Color32::from_rgb(170, 170, 170)
+                                        egui::Color32::from_rgb(180, 180, 180)
                                     };
-                                    let font = egui::FontId::proportional(12.0);
+                                    
+                                    // Calculate Width
+                                    let font = egui::FontId::proportional(12.5); // Slightly larger
                                     let text_width = ui.fonts(|f| {
                                         f.layout_no_wrap(text.clone(), font.clone(), text_color)
                                             .rect
                                             .width()
                                     });
                                     let mut tab_width =
-                                        text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 6.0;
+                                        text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 8.0;
                                     if self.editors.len() <= 1 {
-                                        tab_width -= TAB_CLOSE_SIZE;
+                                       // Even single tab might want a close button in modern designs, 
+                                       // but let's keep it optional if space is tight? 
+                                       // Actuall VS code usually shows it on hover.
+                                       // For now, let's include space for it to avoid jumping.
                                     }
                                     let tab_width = tab_width.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+                                    
                                     let (rect, response) = ui.allocate_exact_size(
                                         egui::Vec2::new(tab_width, TAB_HEIGHT),
                                         egui::Sense::click(),
                                     );
                                     tab_rects.push((i, rect, pinned));
 
+                                    // Background
                                     let bg = if is_active {
                                         TAB_ACTIVE_BG
                                     } else if response.hovered() {
@@ -549,86 +553,110 @@ impl LuxApp {
                                     } else {
                                         TAB_INACTIVE_BG
                                     };
-                                    let rounding = egui::Rounding::same(4.0);
-                                    ui.painter().rect_filled(rect, rounding, bg);
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        rounding,
-                                        egui::Stroke::new(1.0, TAB_BAR_BORDER),
-                                    );
+                                    
+                                    // Custom Tab Painting
+                                    let painter = ui.painter();
+                                    
+                                    // Main tab shape
+                                    painter.rect_filled(rect, 0.0, bg);
+                                    
+                                    // Active top border
                                     if is_active {
-                                        ui.painter().rect_filled(
+                                        painter.rect_filled(
                                             egui::Rect::from_min_size(
-                                                egui::Pos2::new(rect.left(), rect.top()),
+                                                rect.min,
                                                 egui::Vec2::new(rect.width(), 2.0),
                                             ),
-                                            egui::Rounding::ZERO,
+                                            0.0,
                                             ACCENT_COLOR,
                                         );
+                                    } else {
+                                        // Separator line at bottom for inactive tabs implies the active one overlaps
+                                        // But here we can just do nothing for now, simplest flat look
                                     }
 
+                                    // Content Layout
+                                    // Modified dot or Icon
                                     let mut text_x = rect.left() + TAB_PADDING_X;
                                     if modified {
-                                        let dot_radius = 3.5;
-                                        let dot_center = egui::Pos2::new(
-                                            rect.left() + TAB_PADDING_X + dot_radius,
-                                            rect.center().y,
+                                        // A prettier "unsaved" circle
+                                        painter.circle_filled(
+                                            egui::Pos2::new(text_x + 3.0, rect.center().y),
+                                            4.0,
+                                            egui::Color32::WHITE, // Or generic fg
                                         );
-                                        ui.painter().circle_filled(
-                                            dot_center,
-                                            dot_radius,
-                                            egui::Color32::from_rgb(255, 165, 90),
+                                        // And a smaller inner dot for "modified"
+                                        painter.circle_filled(
+                                            egui::Pos2::new(text_x + 3.0, rect.center().y),
+                                            2.5,
+                                            egui::Color32::from_rgb(255, 165, 90), // Orange
                                         );
-                                        text_x += dot_radius * 2.0 + 6.0;
+                                        text_x += 14.0;
+                                    } else {
+                                         // Maybe an icon here? For now just text.
                                     }
-                                    let text_pos = egui::Pos2::new(text_x, rect.center().y);
-                                    ui.painter().text(
-                                        text_pos,
+
+                                    // File Name
+                                    painter.text(
+                                        egui::Pos2::new(text_x, rect.center().y),
                                         egui::Align2::LEFT_CENTER,
                                         text,
                                         font.clone(),
                                         text_color,
                                     );
 
+                                    // Interactions
                                     if response.clicked() {
                                         tab_action = Some(TabAction::Activate(i));
                                     }
-                                    if response.middle_clicked() && self.editors.len() > 1 {
+                                    if response.middle_clicked() {
                                         tab_action = Some(TabAction::Close(i));
-                                        return;
                                     }
 
-                                    if self.editors.len() > 1 {
+                                    // Close Button - Show on hover or if active
+                                    if response.hovered() || is_active {
                                         let close_rect = egui::Rect::from_min_size(
                                             egui::Pos2::new(
-                                                rect.right() - TAB_CLOSE_SIZE - 4.0,
+                                                rect.right() - TAB_CLOSE_SIZE - 6.0,
                                                 rect.center().y - TAB_CLOSE_SIZE / 2.0,
                                             ),
                                             egui::Vec2::new(TAB_CLOSE_SIZE, TAB_CLOSE_SIZE),
                                         );
+                                        
+                                        // Check interaction specifically on the small close rect
                                         let close_resp = ui.interact(
                                             close_rect,
                                             ui.id().with(("tab_close", i)),
-                                            egui::Sense::click(),
+                                            egui::Sense::click()
                                         );
-                                        let mut close_color =
-                                            egui::Color32::from_rgb(150, 150, 150);
-                                        if close_resp.hovered() {
-                                            close_color = egui::Color32::from_rgb(255, 94, 94);
+                                        
+                                        let close_hovered = close_resp.hovered();
+                                        
+                                        // Draw 'x'
+                                        // Rotate 45deg +
+                                        let center = close_rect.center();
+                                        if close_hovered {
+                                             painter.rect_filled(close_rect, 2.0, egui::Color32::from_white_alpha(30));
                                         }
-                                        ui.painter().text(
-                                            close_rect.center(),
-                                            egui::Align2::CENTER_CENTER,
-                                            "×",
-                                            egui::FontId::proportional(11.5),
-                                            close_color,
-                                        );
+                                        
+                                        let stroke = egui::Stroke::new(1.0, if close_hovered { egui::Color32::WHITE } else { egui::Color32::from_gray(150) });
+                                        // Manually draw X for better control than text
+                                        let r = TAB_CLOSE_SIZE / 3.0;
+                                        painter.line_segment([
+                                            center + egui::Vec2::new(-r, -r),
+                                            center + egui::Vec2::new(r, r)
+                                        ], stroke);
+                                        painter.line_segment([
+                                            center + egui::Vec2::new(-r, r),
+                                            center + egui::Vec2::new(r, -r)
+                                        ], stroke);
+
                                         if close_resp.clicked() {
                                             tab_action = Some(TabAction::Close(i));
-                                            return;
                                         }
                                     }
 
+                                    // Context Menu
                                     response.context_menu(|ui| {
                                         if ui.button("Close").clicked() {
                                             tab_action = Some(TabAction::Close(i));
@@ -653,51 +681,25 @@ impl LuxApp {
                                     if response.drag_started() {
                                         self.dragging_tab = Some(i);
                                     }
-
-                                    ui.add_space(4.0);
                                 }
-
-                                let new_tab_resp = ui.add_sized(
-                                    [28.0, TAB_HEIGHT],
-                                    egui::Button::new(
-                                        egui::RichText::new("+")
-                                            .size(14.0)
-                                            .color(egui::Color32::from_rgb(190, 190, 190)),
-                                    )
-                                    .frame(false),
+                                
+                                // New Tab Button (small)
+                                let new_tab_resp = ui.allocate_response(egui::Vec2::new(32.0, TAB_HEIGHT), egui::Sense::click());
+                                if new_tab_resp.hovered() {
+                                    ui.painter().rect_filled(new_tab_resp.rect, 0.0, TAB_HOVER_BG);
+                                }
+                                ui.painter().text(
+                                    new_tab_resp.rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "+",
+                                    egui::FontId::proportional(16.0),
+                                    egui::Color32::GRAY,
                                 );
                                 if new_tab_resp.clicked() {
                                     tab_action = Some(TabAction::NewTab);
-                                    return;
                                 }
                             });
                         });
-
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(info) = &self.git_info {
-                            let mut status = info.branch.clone();
-                            if info.ahead > 0 {
-                                status.push_str(&format!(" ↑{}", info.ahead));
-                            }
-                            if info.behind > 0 {
-                                status.push_str(&format!(" ↓{}", info.behind));
-                            }
-                            let dirty = if info.dirty { " ●" } else { "" };
-                            let label = format!("{}{}", status, dirty);
-                            ui.label(
-                                egui::RichText::new(label)
-                                    .color(egui::Color32::from_rgb(170, 170, 170))
-                                    .size(11.5),
-                            );
-                        } else {
-                            ui.label(
-                                egui::RichText::new("No Git")
-                                    .color(egui::Color32::from_rgb(120, 120, 120))
-                                    .size(11.5),
-                            );
-                        }
-                    });
                 });
 
                 if pointer_released {
@@ -728,25 +730,27 @@ impl LuxApp {
             return;
         }
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
+        // Floating panel look
         egui::Frame::none()
-            .fill(egui::Color32::from_rgb(52, 53, 55))
-            .rounding(egui::Rounding::same(6.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 70)))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .fill(egui::Color32::from_rgb(37, 37, 38))
+            .rounding(egui::Rounding::same(4.0))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 122, 204))) // Active border
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Find:")
-                            .color(egui::Color32::from_rgb(220, 220, 220))
+                        egui::RichText::new("Find")
+                            .color(egui::Color32::from_rgb(200, 200, 200))
                             .size(13.0),
                     );
 
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.search_input)
-                            .desired_width(250.0)
+                            .desired_width(200.0)
                             .font(egui::FontId::monospace(13.0))
                             .text_color(egui::Color32::WHITE)
+                            .margin(egui::Vec2::new(4.0, 2.0))
                             .hint_text("Search..."),
                     );
 
@@ -757,22 +761,20 @@ impl LuxApp {
                     }
 
                     if ui
-                        .add(egui::Button::new(egui::RichText::new("Next").size(12.0)))
+                        .add(egui::Button::new(egui::RichText::new("↓").size(14.0)))
+                        .on_hover_text("Next Match")
                         .clicked()
                     {
                         let query = self.search_input.clone();
                         self.active_editor().find_and_select(&query);
                     }
 
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        self.show_search = false;
-                        self.show_replace = false;
-                    }
+                    // Toggles for options could go here
 
                     if ui
                         .add(egui::Button::new(
-                            egui::RichText::new("\u{2715}").size(12.0),
-                        ))
+                            egui::RichText::new("\u{1F5D9}").size(14.0), // Cancel X
+                        ).frame(false))
                         .clicked()
                     {
                         self.show_search = false;
@@ -783,26 +785,27 @@ impl LuxApp {
 
         // Replace row
         if self.show_replace {
-            ui.add_space(4.0);
+            ui.add_space(2.0);
             egui::Frame::none()
-                .fill(egui::Color32::from_rgb(52, 53, 55))
-                .rounding(egui::Rounding::same(6.0))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 70)))
-                .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+                .fill(egui::Color32::from_rgb(37, 37, 38))
+                .rounding(egui::Rounding::same(4.0))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)))
+                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Replace:")
-                                .color(egui::Color32::from_rgb(220, 220, 220))
+                            egui::RichText::new("Replace")
+                                .color(egui::Color32::from_rgb(200, 200, 200))
                                 .size(13.0),
                         );
 
                         ui.add(
                             egui::TextEdit::singleline(&mut self.replace_input)
-                                .desired_width(250.0)
+                                .desired_width(200.0)
                                 .font(egui::FontId::monospace(13.0))
                                 .text_color(egui::Color32::WHITE)
-                                .hint_text("Replace with..."),
+                                .margin(egui::Vec2::new(4.0, 2.0))
+                                .hint_text("Replace..."),
                         );
 
                         if ui
@@ -816,7 +819,7 @@ impl LuxApp {
 
                         if ui
                             .add(egui::Button::new(
-                                egui::RichText::new("Replace All").size(12.0),
+                                egui::RichText::new("All").size(12.0),
                             ))
                             .clicked()
                         {
@@ -834,17 +837,17 @@ impl LuxApp {
             return;
         }
 
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         egui::Frame::none()
-            .fill(egui::Color32::from_rgb(52, 53, 55))
-            .rounding(egui::Rounding::same(6.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(65, 65, 70)))
-            .inner_margin(egui::Margin::symmetric(10.0, 6.0))
+            .fill(egui::Color32::from_rgb(37, 37, 38))
+            .rounding(egui::Rounding::same(4.0))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 122, 204)))
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Go to Line:")
-                            .color(egui::Color32::from_rgb(220, 220, 220))
+                        egui::RichText::new("Go to Line")
+                            .color(egui::Color32::from_rgb(200, 200, 200))
                             .size(13.0),
                     );
 
@@ -853,7 +856,8 @@ impl LuxApp {
                             .desired_width(100.0)
                             .font(egui::FontId::monospace(13.0))
                             .text_color(egui::Color32::WHITE)
-                            .hint_text("Line number"),
+                            .margin(egui::Vec2::new(4.0, 2.0))
+                            .hint_text("Line..."),
                     );
 
                     if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -864,6 +868,13 @@ impl LuxApp {
                     }
 
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        self.show_goto_line = false;
+                    }
+                    
+                    if ui.button("Go").clicked() {
+                        if let Ok(line) = self.goto_line_input.trim().parse::<usize>() {
+                            self.active_editor().goto_line(line);
+                        }
                         self.show_goto_line = false;
                     }
                 });
@@ -888,24 +899,27 @@ impl LuxApp {
             vec![editor.title.clone()]
         };
 
+        // Minimal breadcrumbs (transparent background)
         egui::Frame::none()
-            .fill(egui::Color32::from_rgb(34, 35, 38))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(25, 26, 28)))
-            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 6.0)) // Indent start
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::Vec2::new(4.0, 0.0);
                     for (idx, part) in crumbs.iter().enumerate() {
                         let is_last = idx == crumbs.len() - 1;
                         let color = if is_last {
-                            egui::Color32::from_rgb(230, 230, 230)
+                            egui::Color32::from_rgb(220, 220, 220)
                         } else {
-                            egui::Color32::from_rgb(150, 150, 150)
+                            egui::Color32::from_rgb(120, 120, 120)
                         };
+                        
+                        // Clickable logic could go here later
                         ui.label(egui::RichText::new(part).color(color).size(12.0));
+                        
                         if !is_last {
                             ui.label(
                                 egui::RichText::new("›")
-                                    .color(egui::Color32::from_rgb(120, 120, 120))
+                                    .color(egui::Color32::from_rgb(80, 80, 80))
                                     .size(12.0),
                             );
                         }
@@ -988,7 +1002,7 @@ impl eframe::App for LuxApp {
                 );
 
                 // Status bar
-                crate::ui::status_bar::show(ui, &self.editors[self.active_tab]);
+                crate::ui::status_bar::show(ui, &self.editors[self.active_tab], self.git_info.as_ref());
             });
 
         // Unsaved changes confirmation dialog
@@ -1071,7 +1085,7 @@ fn find_drop_target(
     best.map(|(idx, _)| idx).filter(|idx| *idx != dragging_idx)
 }
 
-fn read_git_info(cwd: Option<&Path>) -> Option<GitInfo> {
+fn read_git_info(cwd: Option<&Path>) -> Option<crate::ui::status_bar::GitInfo> {
     let mut cmd = Command::new("git");
     cmd.arg("status").arg("-sb");
     if let Some(path) = cwd {
@@ -1107,7 +1121,7 @@ fn read_git_info(cwd: Option<&Path>) -> Option<GitInfo> {
         }
     }
     let dirty = lines.next().is_some();
-    Some(GitInfo {
+    Some(crate::ui::status_bar::GitInfo {
         branch,
         ahead,
         behind,
