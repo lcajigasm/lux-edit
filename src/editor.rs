@@ -1,4 +1,5 @@
 use ropey::Rope;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -28,6 +29,20 @@ impl Ord for Position {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.line, self.col).cmp(&(other.line, other.col))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DiffHunk {
+    pub start: usize,
+    pub end: usize,
+    pub kind: DiffKind,
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +112,13 @@ pub struct Editor {
     pub scroll_y: f32,
     pub scroll_x: f32,
     pub title: String,
+    pub pinned: bool,
+    pub folded_lines: BTreeSet<usize>,
+    pub minimap_enabled: bool,
+    pub minimap_width: f32,
+    pub minimap_opacity: f32,
+    pub diff_hunks: Vec<DiffHunk>,
+    pub diff_last_check: f64,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Timestamp of last edit/keystroke (seconds since epoch via std::time)
@@ -113,6 +135,13 @@ impl Editor {
             scroll_y: 0.0,
             scroll_x: 0.0,
             title: "Untitled".into(),
+            pinned: false,
+            folded_lines: BTreeSet::new(),
+            minimap_enabled: true,
+            minimap_width: 120.0,
+            minimap_opacity: 0.9,
+            diff_hunks: Vec::new(),
+            diff_last_check: 0.0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit_time: 0.0,
@@ -136,6 +165,13 @@ impl Editor {
             redo_stack: Vec::new(),
             last_edit_time: 0.0,
             title,
+            pinned: false,
+            folded_lines: BTreeSet::new(),
+            minimap_enabled: true,
+            minimap_width: 120.0,
+            minimap_opacity: 0.9,
+            diff_hunks: Vec::new(),
+            diff_last_check: 0.0,
         })
     }
 

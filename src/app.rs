@@ -1,5 +1,7 @@
 use arboard::Clipboard;
 use eframe::egui;
+use std::path::Path;
+use std::process::Command;
 
 use crate::editor::Editor;
 use crate::syntax::SyntaxHighlighter;
@@ -24,6 +26,25 @@ const TAB_PADDING_X: f32 = 14.0;
 const TAB_CLOSE_SIZE: f32 = 12.0;
 const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 149, 89);
 
+#[derive(Clone, Debug, Default)]
+struct GitInfo {
+    branch: String,
+    ahead: usize,
+    behind: usize,
+    dirty: bool,
+}
+
+#[derive(Clone, Copy)]
+enum TabAction {
+    Activate(usize),
+    Close(usize),
+    CloseOthers(usize),
+    ReopenClosed,
+    TogglePin(usize, bool),
+    Reorder(usize, usize),
+    NewTab,
+}
+
 pub struct LuxApp {
     pub editors: Vec<Editor>,
     pub active_tab: usize,
@@ -38,7 +59,12 @@ pub struct LuxApp {
     pub highlighter: SyntaxHighlighter,
     /// If Some, show a "save before closing?" dialog for this tab index.
     pub confirm_close_tab: Option<usize>,
+    pub pending_close_others: Option<usize>,
+    pub closed_tabs: Vec<Editor>,
+    pub dragging_tab: Option<usize>,
     pub editor_theme: EditorThemeKind,
+    git_info: Option<GitInfo>,
+    git_last_check: f64,
 }
 
 impl LuxApp {
@@ -56,7 +82,12 @@ impl LuxApp {
             clipboard: Clipboard::new().ok(),
             highlighter: SyntaxHighlighter::new(),
             confirm_close_tab: None,
+            pending_close_others: None,
+            closed_tabs: Vec::new(),
+            dragging_tab: None,
             editor_theme: EditorThemeKind::Monokai,
+            git_info: None,
+            git_last_check: 0.0,
         }
     }
 
@@ -86,12 +117,113 @@ impl LuxApp {
 
     fn force_close_tab(&mut self, idx: usize) {
         if self.editors.len() > 1 {
-            self.editors.remove(idx);
+            let closed = self.editors.remove(idx);
+            self.closed_tabs.push(closed);
+            if self.closed_tabs.len() > 50 {
+                self.closed_tabs.remove(0);
+            }
             if self.active_tab >= self.editors.len() {
                 self.active_tab = self.editors.len() - 1;
             }
         }
         self.confirm_close_tab = None;
+    }
+
+    fn reopen_closed_tab(&mut self) {
+        if let Some(editor) = self.closed_tabs.pop() {
+            self.editors.push(editor);
+            self.active_tab = self.editors.len() - 1;
+        }
+    }
+
+    fn close_other_tabs(&mut self, keep_idx: usize) {
+        if self.editors.len() <= 1 {
+            return;
+        }
+        let mut idx = 0;
+        let mut keep_idx = keep_idx;
+        while idx < self.editors.len() {
+            if idx == keep_idx || self.editors[idx].pinned {
+                idx += 1;
+                continue;
+            }
+            if self.editors[idx].modified {
+                self.confirm_close_tab = Some(idx);
+                self.pending_close_others = Some(keep_idx);
+                return;
+            }
+            if idx < keep_idx {
+                keep_idx = keep_idx.saturating_sub(1);
+            }
+            self.force_close_tab(idx);
+        }
+        self.pending_close_others = None;
+    }
+
+    fn pin_tab(&mut self, idx: usize, pinned: bool) {
+        if let Some(editor) = self.editors.get_mut(idx) {
+            editor.pinned = pinned;
+        }
+        let active_path = self.editors[self.active_tab].file_path.clone();
+        let active_title = self.editors[self.active_tab].title.clone();
+        let mut pinned_tabs = Vec::new();
+        let mut regular_tabs = Vec::new();
+        for editor in self.editors.drain(..) {
+            if editor.pinned {
+                pinned_tabs.push(editor);
+            } else {
+                regular_tabs.push(editor);
+            }
+        }
+        pinned_tabs.append(&mut regular_tabs);
+        self.editors = pinned_tabs;
+        if let Some(path) = active_path {
+            if let Some((idx, _)) = self
+                .editors
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.file_path == Some(path.clone()))
+            {
+                self.active_tab = idx;
+            }
+        } else if let Some((idx, _)) = self
+            .editors
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.title == active_title)
+        {
+            self.active_tab = idx;
+        }
+    }
+
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.editors.len() || to >= self.editors.len() {
+            return;
+        }
+        let tab = self.editors.remove(from);
+        self.editors.insert(to, tab);
+        if self.active_tab == from {
+            self.active_tab = to;
+        } else if from < self.active_tab && to >= self.active_tab {
+            self.active_tab = self.active_tab.saturating_sub(1);
+        } else if from > self.active_tab && to <= self.active_tab {
+            self.active_tab += 1;
+        }
+    }
+
+    fn update_git_info(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.git_last_check < 1.0 {
+            return;
+        }
+        self.git_last_check = now;
+        let path = self
+            .editors
+            .get(self.active_tab)
+            .and_then(|e| e.file_path.as_ref())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf());
+        self.git_info = read_git_info(path.as_deref());
     }
 
     fn open_file(&mut self) {
@@ -315,6 +447,35 @@ impl LuxApp {
                             self.show_goto_line = !self.show_goto_line;
                             ui.close_menu();
                         }
+                        ui.separator();
+                        let minimap_enabled = self.active_editor().minimap_enabled;
+                        if ui
+                            .selectable_label(minimap_enabled, "Toggle Minimap")
+                            .clicked()
+                        {
+                            self.active_editor().minimap_enabled = !minimap_enabled;
+                            ui.close_menu();
+                        }
+                        if ui.button("Minimap Width +").clicked() {
+                            let editor = self.active_editor();
+                            editor.minimap_width = (editor.minimap_width + 10.0).clamp(80.0, 200.0);
+                            ui.close_menu();
+                        }
+                        if ui.button("Minimap Width -").clicked() {
+                            let editor = self.active_editor();
+                            editor.minimap_width = (editor.minimap_width - 10.0).clamp(80.0, 200.0);
+                            ui.close_menu();
+                        }
+                        if ui.button("Minimap Opacity +").clicked() {
+                            let editor = self.active_editor();
+                            editor.minimap_opacity = (editor.minimap_opacity + 0.1).clamp(0.2, 1.0);
+                            ui.close_menu();
+                        }
+                        if ui.button("Minimap Opacity -").clicked() {
+                            let editor = self.active_editor();
+                            editor.minimap_opacity = (editor.minimap_opacity - 0.1).clamp(0.2, 1.0);
+                            ui.close_menu();
+                        }
                     });
 
                     ui.menu_button(rich_label("Theme"), |ui| {
@@ -339,131 +500,226 @@ impl LuxApp {
             .stroke(egui::Stroke::new(1.0, TAB_BAR_BORDER))
             .inner_margin(egui::Margin::symmetric(8.0, 2.0))
             .show(ui, |ui| {
-                egui::ScrollArea::horizontal()
-                    .id_salt("tabs_scroll")
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for i in 0..self.editors.len() {
-                                let editor = &self.editors[i];
-                                let is_active = i == self.active_tab;
-                                let mut text = editor.title.clone();
-                                if editor.modified {
-                                    text.push('*');
-                                }
+                let mut tab_rects: Vec<(usize, egui::Rect, bool)> = Vec::new();
+                let mut tab_action: Option<TabAction> = None;
+                let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos());
+                let pointer_released = ui.ctx().input(|i| i.pointer.any_released());
 
-                                let text_color = if is_active {
-                                    egui::Color32::from_rgb(230, 230, 230)
-                                } else {
-                                    egui::Color32::from_rgb(170, 170, 170)
-                                };
-                                let font = egui::FontId::proportional(12.0);
-                                let text_width = ui.fonts(|f| {
-                                    f.layout_no_wrap(text.clone(), font.clone(), text_color)
-                                        .rect
-                                        .width()
-                                });
-                                let mut tab_width =
-                                    text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 6.0;
-                                if self.editors.len() <= 1 {
-                                    tab_width -= TAB_CLOSE_SIZE;
-                                }
-                                let tab_width = tab_width.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::Vec2::new(tab_width, TAB_HEIGHT),
-                                    egui::Sense::click(),
-                                );
+                ui.horizontal(|ui| {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("tabs_scroll")
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for i in 0..self.editors.len() {
+                                    let (title, modified, pinned) = {
+                                        let editor = &self.editors[i];
+                                        (editor.title.clone(), editor.modified, editor.pinned)
+                                    };
+                                    let is_active = i == self.active_tab;
+                                    let text = title.clone();
 
-                                let bg = if is_active {
-                                    TAB_ACTIVE_BG
-                                } else if response.hovered() {
-                                    TAB_HOVER_BG
-                                } else {
-                                    TAB_INACTIVE_BG
-                                };
-                                let rounding = egui::Rounding::same(4.0);
-                                ui.painter().rect_filled(rect, rounding, bg);
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    rounding,
-                                    egui::Stroke::new(1.0, TAB_BAR_BORDER),
-                                );
-                                if is_active {
-                                    ui.painter().rect_filled(
-                                        egui::Rect::from_min_size(
-                                            egui::Pos2::new(rect.left(), rect.top()),
-                                            egui::Vec2::new(rect.width(), 2.0),
-                                        ),
-                                        egui::Rounding::ZERO,
-                                        ACCENT_COLOR,
-                                    );
-                                }
-
-                                let text_pos =
-                                    egui::Pos2::new(rect.left() + TAB_PADDING_X, rect.center().y);
-                                ui.painter().text(
-                                    text_pos,
-                                    egui::Align2::LEFT_CENTER,
-                                    text,
-                                    font.clone(),
-                                    text_color,
-                                );
-
-                                if response.clicked() {
-                                    self.active_tab = i;
-                                }
-                                if response.middle_clicked() && self.editors.len() > 1 {
-                                    self.close_tab_idx(i);
-                                    break;
-                                }
-
-                                if self.editors.len() > 1 {
-                                    let close_rect = egui::Rect::from_min_size(
-                                        egui::Pos2::new(
-                                            rect.right() - TAB_CLOSE_SIZE - 4.0,
-                                            rect.center().y - TAB_CLOSE_SIZE / 2.0,
-                                        ),
-                                        egui::Vec2::new(TAB_CLOSE_SIZE, TAB_CLOSE_SIZE),
-                                    );
-                                    let close_resp = ui.interact(
-                                        close_rect,
-                                        ui.id().with(("tab_close", i)),
+                                    let text_color = if is_active {
+                                        egui::Color32::from_rgb(230, 230, 230)
+                                    } else {
+                                        egui::Color32::from_rgb(170, 170, 170)
+                                    };
+                                    let font = egui::FontId::proportional(12.0);
+                                    let text_width = ui.fonts(|f| {
+                                        f.layout_no_wrap(text.clone(), font.clone(), text_color)
+                                            .rect
+                                            .width()
+                                    });
+                                    let mut tab_width =
+                                        text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 6.0;
+                                    if self.editors.len() <= 1 {
+                                        tab_width -= TAB_CLOSE_SIZE;
+                                    }
+                                    let tab_width = tab_width.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::Vec2::new(tab_width, TAB_HEIGHT),
                                         egui::Sense::click(),
                                     );
-                                    let mut close_color = egui::Color32::from_rgb(150, 150, 150);
-                                    if close_resp.hovered() {
-                                        close_color = egui::Color32::from_rgb(255, 94, 94);
-                                    }
-                                    ui.painter().text(
-                                        close_rect.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "×",
-                                        egui::FontId::proportional(11.5),
-                                        close_color,
+                                    tab_rects.push((i, rect, pinned));
+
+                                    let bg = if is_active {
+                                        TAB_ACTIVE_BG
+                                    } else if response.hovered() {
+                                        TAB_HOVER_BG
+                                    } else {
+                                        TAB_INACTIVE_BG
+                                    };
+                                    let rounding = egui::Rounding::same(4.0);
+                                    ui.painter().rect_filled(rect, rounding, bg);
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        rounding,
+                                        egui::Stroke::new(1.0, TAB_BAR_BORDER),
                                     );
-                                    if close_resp.clicked() {
-                                        self.close_tab_idx(i);
-                                        break;
+                                    if is_active {
+                                        ui.painter().rect_filled(
+                                            egui::Rect::from_min_size(
+                                                egui::Pos2::new(rect.left(), rect.top()),
+                                                egui::Vec2::new(rect.width(), 2.0),
+                                            ),
+                                            egui::Rounding::ZERO,
+                                            ACCENT_COLOR,
+                                        );
                                     }
+
+                                    let mut text_x = rect.left() + TAB_PADDING_X;
+                                    if modified {
+                                        let dot_radius = 3.5;
+                                        let dot_center = egui::Pos2::new(
+                                            rect.left() + TAB_PADDING_X + dot_radius,
+                                            rect.center().y,
+                                        );
+                                        ui.painter().circle_filled(
+                                            dot_center,
+                                            dot_radius,
+                                            egui::Color32::from_rgb(255, 165, 90),
+                                        );
+                                        text_x += dot_radius * 2.0 + 6.0;
+                                    }
+                                    let text_pos = egui::Pos2::new(text_x, rect.center().y);
+                                    ui.painter().text(
+                                        text_pos,
+                                        egui::Align2::LEFT_CENTER,
+                                        text,
+                                        font.clone(),
+                                        text_color,
+                                    );
+
+                                    if response.clicked() {
+                                        tab_action = Some(TabAction::Activate(i));
+                                    }
+                                    if response.middle_clicked() && self.editors.len() > 1 {
+                                        tab_action = Some(TabAction::Close(i));
+                                        return;
+                                    }
+
+                                    if self.editors.len() > 1 {
+                                        let close_rect = egui::Rect::from_min_size(
+                                            egui::Pos2::new(
+                                                rect.right() - TAB_CLOSE_SIZE - 4.0,
+                                                rect.center().y - TAB_CLOSE_SIZE / 2.0,
+                                            ),
+                                            egui::Vec2::new(TAB_CLOSE_SIZE, TAB_CLOSE_SIZE),
+                                        );
+                                        let close_resp = ui.interact(
+                                            close_rect,
+                                            ui.id().with(("tab_close", i)),
+                                            egui::Sense::click(),
+                                        );
+                                        let mut close_color =
+                                            egui::Color32::from_rgb(150, 150, 150);
+                                        if close_resp.hovered() {
+                                            close_color = egui::Color32::from_rgb(255, 94, 94);
+                                        }
+                                        ui.painter().text(
+                                            close_rect.center(),
+                                            egui::Align2::CENTER_CENTER,
+                                            "×",
+                                            egui::FontId::proportional(11.5),
+                                            close_color,
+                                        );
+                                        if close_resp.clicked() {
+                                            tab_action = Some(TabAction::Close(i));
+                                            return;
+                                        }
+                                    }
+
+                                    response.context_menu(|ui| {
+                                        if ui.button("Close").clicked() {
+                                            tab_action = Some(TabAction::Close(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Close Others").clicked() {
+                                            tab_action = Some(TabAction::CloseOthers(i));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Reopen Closed Tab").clicked() {
+                                            tab_action = Some(TabAction::ReopenClosed);
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        let pin_label = if pinned { "Unpin" } else { "Pin" };
+                                        if ui.button(pin_label).clicked() {
+                                            tab_action = Some(TabAction::TogglePin(i, !pinned));
+                                            ui.close_menu();
+                                        }
+                                    });
+
+                                    if response.drag_started() {
+                                        self.dragging_tab = Some(i);
+                                    }
+
+                                    ui.add_space(4.0);
                                 }
 
-                                ui.add_space(4.0);
-                            }
-
-                            let new_tab_resp = ui.add_sized(
-                                [28.0, TAB_HEIGHT],
-                                egui::Button::new(
-                                    egui::RichText::new("+")
-                                        .size(14.0)
-                                        .color(egui::Color32::from_rgb(190, 190, 190)),
-                                )
-                                .frame(false),
-                            );
-                            if new_tab_resp.clicked() {
-                                self.new_tab();
-                            }
+                                let new_tab_resp = ui.add_sized(
+                                    [28.0, TAB_HEIGHT],
+                                    egui::Button::new(
+                                        egui::RichText::new("+")
+                                            .size(14.0)
+                                            .color(egui::Color32::from_rgb(190, 190, 190)),
+                                    )
+                                    .frame(false),
+                                );
+                                if new_tab_resp.clicked() {
+                                    tab_action = Some(TabAction::NewTab);
+                                    return;
+                                }
+                            });
                         });
+
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(info) = &self.git_info {
+                            let mut status = info.branch.clone();
+                            if info.ahead > 0 {
+                                status.push_str(&format!(" ↑{}", info.ahead));
+                            }
+                            if info.behind > 0 {
+                                status.push_str(&format!(" ↓{}", info.behind));
+                            }
+                            let dirty = if info.dirty { " ●" } else { "" };
+                            let label = format!("{}{}", status, dirty);
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .color(egui::Color32::from_rgb(170, 170, 170))
+                                    .size(11.5),
+                            );
+                        } else {
+                            ui.label(
+                                egui::RichText::new("No Git")
+                                    .color(egui::Color32::from_rgb(120, 120, 120))
+                                    .size(11.5),
+                            );
+                        }
                     });
+                });
+
+                if pointer_released {
+                    if let (Some(drag_idx), Some(pos)) = (self.dragging_tab, pointer_pos) {
+                        if let Some(target_idx) = find_drop_target(drag_idx, pos, &tab_rects) {
+                            tab_action = Some(TabAction::Reorder(drag_idx, target_idx));
+                        }
+                    }
+                    self.dragging_tab = None;
+                }
+
+                if let Some(action) = tab_action {
+                    match action {
+                        TabAction::Activate(idx) => self.active_tab = idx,
+                        TabAction::Close(idx) => self.close_tab_idx(idx),
+                        TabAction::CloseOthers(idx) => self.close_other_tabs(idx),
+                        TabAction::ReopenClosed => self.reopen_closed_tab(),
+                        TabAction::TogglePin(idx, pinned) => self.pin_tab(idx, pinned),
+                        TabAction::Reorder(from, to) => self.move_tab(from, to),
+                        TabAction::NewTab => self.new_tab(),
+                    }
+                }
             });
     }
 
@@ -613,12 +869,58 @@ impl LuxApp {
                 });
             });
     }
+
+    fn show_breadcrumbs(&mut self, ui: &mut egui::Ui) {
+        let editor = &self.editors[self.active_tab];
+        let crumbs = if let Some(path) = &editor.file_path {
+            let mut parts: Vec<String> = path
+                .components()
+                .filter_map(|c| c.as_os_str().to_str().map(|s| s.to_string()))
+                .collect();
+            if parts.is_empty() {
+                vec![editor.title.clone()]
+            } else {
+                let file = parts.pop().unwrap_or_else(|| editor.title.clone());
+                parts.push(file);
+                parts
+            }
+        } else {
+            vec![editor.title.clone()]
+        };
+
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(34, 35, 38))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(25, 26, 28)))
+            .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (idx, part) in crumbs.iter().enumerate() {
+                        let is_last = idx == crumbs.len() - 1;
+                        let color = if is_last {
+                            egui::Color32::from_rgb(230, 230, 230)
+                        } else {
+                            egui::Color32::from_rgb(150, 150, 150)
+                        };
+                        ui.label(egui::RichText::new(part).color(color).size(12.0));
+                        if !is_last {
+                            ui.label(
+                                egui::RichText::new("›")
+                                    .color(egui::Color32::from_rgb(120, 120, 120))
+                                    .size(12.0),
+                            );
+                        }
+                    }
+                });
+            });
+    }
 }
 
 impl eframe::App for LuxApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Dark theme
         ctx.set_visuals(egui::Visuals::dark());
+
+        self.update_git_info(ctx);
 
         // Global shortcuts (handled before UI to avoid conflicts)
         if !self.command_palette.visible {
@@ -642,6 +944,9 @@ impl eframe::App for LuxApp {
             .show(ctx, |ui| {
                 // Tab bar
                 self.show_tab_bar(ui);
+
+                // Breadcrumbs
+                self.show_breadcrumbs(ui);
 
                 // Search / goto line bar
                 self.show_search_bar(ui);
@@ -667,12 +972,18 @@ impl eframe::App for LuxApp {
                     && !self.command_palette.visible
                     && self.confirm_close_tab.is_none();
                 let editor_theme = self.editor_theme.palette();
+                let search_query = if self.search_input.trim().is_empty() {
+                    None
+                } else {
+                    Some(self.search_input.as_str())
+                };
                 crate::ui::editor_view::show(
                     &mut editor_ui,
                     &mut self.editors[self.active_tab],
                     &mut self.clipboard,
                     &self.highlighter,
                     &editor_theme,
+                    search_query,
                     auto_focus,
                 );
 
@@ -705,6 +1016,7 @@ impl eframe::App for LuxApp {
                         }
                         if ui.button("Cancel").clicked() {
                             self.confirm_close_tab = None;
+                            self.pending_close_others = None;
                         }
                     });
                 });
@@ -714,9 +1026,15 @@ impl eframe::App for LuxApp {
                     // Save then close
                     let _ = self.editors[tab_idx].save();
                     self.force_close_tab(tab_idx);
+                    if let Some(keep_idx) = self.pending_close_others {
+                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
+                    }
                 }
                 Some(false) => {
                     self.force_close_tab(tab_idx);
+                    if let Some(keep_idx) = self.pending_close_others {
+                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
+                    }
                 }
                 None => {}
             }
@@ -724,4 +1042,75 @@ impl eframe::App for LuxApp {
 
         ctx.request_repaint();
     }
+}
+
+fn find_drop_target(
+    dragging_idx: usize,
+    pointer: egui::Pos2,
+    rects: &[(usize, egui::Rect, bool)],
+) -> Option<usize> {
+    let mut drag_pinned = None;
+    for (idx, _, pinned) in rects {
+        if *idx == dragging_idx {
+            drag_pinned = Some(*pinned);
+            break;
+        }
+    }
+    let drag_pinned = drag_pinned?;
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, rect, pinned) in rects {
+        if *pinned != drag_pinned {
+            continue;
+        }
+        let center_x = rect.center().x;
+        let dist = (pointer.x - center_x).abs();
+        if best.map(|(_, d)| dist < d).unwrap_or(true) {
+            best = Some((*idx, dist));
+        }
+    }
+    best.map(|(idx, _)| idx).filter(|idx| *idx != dragging_idx)
+}
+
+fn read_git_info(cwd: Option<&Path>) -> Option<GitInfo> {
+    let mut cmd = Command::new("git");
+    cmd.arg("status").arg("-sb");
+    if let Some(path) = cwd {
+        cmd.current_dir(path);
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let first = lines.next()?.trim();
+    if !first.starts_with("## ") {
+        return None;
+    }
+    let mut branch = first.trim_start_matches("## ").to_string();
+    let mut ahead = 0usize;
+    let mut behind = 0usize;
+    if let Some((name, rest)) = branch.clone().split_once("...") {
+        branch = name.to_string();
+        if let Some(start) = rest.find('[') {
+            if let Some(end) = rest.find(']') {
+                let stats = &rest[start + 1..end];
+                for part in stats.split(',') {
+                    let part = part.trim();
+                    if let Some(value) = part.strip_prefix("ahead ") {
+                        ahead = value.parse().unwrap_or(0);
+                    } else if let Some(value) = part.strip_prefix("behind ") {
+                        behind = value.parse().unwrap_or(0);
+                    }
+                }
+            }
+        }
+    }
+    let dirty = lines.next().is_some();
+    Some(GitInfo {
+        branch,
+        ahead,
+        behind,
+        dirty,
+    })
 }

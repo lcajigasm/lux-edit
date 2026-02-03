@@ -1,18 +1,9 @@
 # Roadmap / TODO
 
-## Minimap
-- Render diff hunks, search matches, and selection overlays in the minimap.
-- Provide hover preview tooltips that show surrounding code when the cursor is over the minimap.
-- Support configurable width, opacity, and a toggle per tab/workspace.
-- Implement click-to-fold markers and keyboard shortcuts tied to the minimap viewport.
-
 ## Tabs & Title Bar
-- Add drag-and-drop reordering, pinning, and tab context menus (close others, reopen closed tab).
-- Show dirty indicators via subtle colored strips and provide breadcrumb/path display above the editor.
-- Integrate workspace indicators (branch name, remote status) near the tab row.
 
 ## Editor UX
-- Implement folding gutters, inline blame annotations, and code-lens metrics.
+- Implement inline blame annotations and code-lens metrics.
 - Add indent guides, column rulers, multi-caret column selection, and macro recording.
 - Integrate snippets, auto-completion, diagnostics, and formatting via LSP.
 - Support rich multi-language syntax highlighting and coloring for major ecosystems (C/C++, Rust, Go, Python, JS/TS, HTML/CSS, Java, C#, SQL, shell, etc.).
@@ -50,3 +41,65 @@
 - Design plugin architecture for syntax packages, formatters, build tasks, and keymaps.
 - Provide scripting API (Lua/JS/Rust) with safe sandboxing and lifecycle hooks.
 - Ship a marketplace/registry integration for installing/updating extensions.
+
+## File Management
+- Add project explorer with file icons, quick open, and recent workspaces list.
+- Implement file operations: rename/move/copy/delete, new file/folder, duplicate.
+- Support file watchers with external change detection and merge/overwrite prompts.
+- Add workspace-level settings and per-folder overrides.
+
+## Search & Navigation
+- Global search with regex, case sensitivity, and file include/exclude filters.
+- Search results panel with previews and multi-file replace.
+- Symbol search (document/workspace) with fuzzy ranking.
+- Jump to definition/references/implementations (LSP).
+
+## Refactoring
+- Rename symbol, extract method/variable, inline variable, organize imports.
+- Safe refactor previews with diff/rollback per file.
+- Code actions with quick fixes and auto-import suggestions.
+
+## Debugging & Tasks
+- Integrated debugger UI with breakpoints, watch, and call stack.
+- Task runner panel to configure build/test/lint tasks.
+- Run configurations per workspace with environment overrides.
+
+## Terminal & Output
+- Built-in terminal with multiple profiles, split panes, and theming.
+- Output/Problems panels with filtering and copyable logs.
+- Linkable stack traces to jump to files/lines.
+
+## Diagnostics & Formatting
+- Diagnostics list with severity filters and per-language toggles.
+- On-save and on-type formatting with per-language formatter selection.
+- Lint rules overrides at workspace and folder scope.
+
+## Collaboration
+- Live share / pair programming sessions with cursor tracking.
+- Comments/annotations and review mode (inline notes).
+- Session snapshots for handoffs.
+
+## Accessibility
+- High-contrast themes, scalable UI, and font size presets.
+- Full keyboard navigation with visible focus indicators.
+- Screen reader labels for key UI components.
+
+## Workspace & Projects
+- Multi-root workspaces with per-root settings.
+- Project-specific gitignore patterns and search scope controls.
+- Workspace trust model for running scripts/extensions.
+
+## Security & Privacy
+- Safe mode for untrusted projects (restricted scripts/extensions).
+- Secrets scanning and redaction in logs.
+- Optional telemetry configuration with explicit consent.
+
+## Documentation & Help
+- Built-in help for shortcuts and features (cheat sheet).
+- Interactive onboarding/tutorial mode.
+- Troubleshooting panel for diagnostics and logs.
+
+## Packaging & Distribution
+- Cross-platform installers and auto-updater.
+- Portable mode and CLI entry point for opening files/projects.
+- App configuration export/import for team setups.
