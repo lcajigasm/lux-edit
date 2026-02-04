@@ -31,6 +31,7 @@ impl Ord for Position {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiffKind {
     Added,
@@ -119,10 +120,83 @@ pub struct Editor {
     pub minimap_opacity: f32,
     pub diff_hunks: Vec<DiffHunk>,
     pub diff_last_check: f64,
+    pub indent_style: IndentStyle,
+    pub indent_width: usize,
+    pub line_ending: LineEnding,
+    pub encoding: TextEncoding,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Timestamp of last edit/keystroke (seconds since epoch via std::time)
     pub last_edit_time: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndentStyle {
+    Spaces,
+    Tabs,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineEnding {
+    Lf,
+    CrLf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextEncoding {
+    Utf8,
+    Utf8Bom,
+}
+
+fn detect_line_ending(content: &str) -> LineEnding {
+    if content.contains("\r\n") {
+        LineEnding::CrLf
+    } else {
+        LineEnding::Lf
+    }
+}
+
+fn normalize_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n")
+}
+
+fn detect_indent_style(content: &str) -> (IndentStyle, usize) {
+    let mut tab_hits = 0usize;
+    let mut space_indents: Vec<usize> = Vec::new();
+    for line in content.lines().take(200) {
+        if line.is_empty() {
+            continue;
+        }
+        let mut spaces = 0usize;
+        for ch in line.chars() {
+            match ch {
+                '\t' => {
+                    tab_hits += 1;
+                    break;
+                }
+                ' ' => spaces += 1,
+                _ => {
+                    if spaces > 0 {
+                        space_indents.push(spaces);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if tab_hits > 0 {
+        return (IndentStyle::Tabs, 4);
+    }
+
+    let mut best = 4usize;
+    for candidate in [2usize, 4, 8] {
+        if space_indents.iter().any(|v| *v == candidate) {
+            best = candidate;
+            break;
+        }
+    }
+    (IndentStyle::Spaces, best)
 }
 
 impl Editor {
@@ -142,6 +216,10 @@ impl Editor {
             minimap_opacity: 0.9,
             diff_hunks: Vec::new(),
             diff_last_check: 0.0,
+            indent_style: IndentStyle::Spaces,
+            indent_width: 4,
+            line_ending: LineEnding::Lf,
+            encoding: TextEncoding::Utf8,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit_time: 0.0,
@@ -149,7 +227,15 @@ impl Editor {
     }
 
     pub fn from_file(path: PathBuf) -> Result<Self, std::io::Error> {
-        let content = fs::read_to_string(&path)?;
+        let mut content = fs::read_to_string(&path)?;
+        let mut encoding = TextEncoding::Utf8;
+        if content.starts_with('\u{FEFF}') {
+            encoding = TextEncoding::Utf8Bom;
+            content = content.trim_start_matches('\u{FEFF}').to_string();
+        }
+        let line_ending = detect_line_ending(&content);
+        let content = normalize_line_endings(&content);
+        let (indent_style, indent_width) = detect_indent_style(&content);
         let title = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -172,12 +258,16 @@ impl Editor {
             minimap_opacity: 0.9,
             diff_hunks: Vec::new(),
             diff_last_check: 0.0,
+            indent_style,
+            indent_width,
+            line_ending,
+            encoding,
         })
     }
 
     pub fn save(&mut self) -> Result<(), std::io::Error> {
         if let Some(path) = &self.file_path {
-            fs::write(path, self.rope.to_string())?;
+            fs::write(path, self.serialized_contents())?;
             self.modified = false;
             Ok(())
         } else {
@@ -189,7 +279,7 @@ impl Editor {
     }
 
     pub fn save_as(&mut self, path: PathBuf) -> Result<(), std::io::Error> {
-        fs::write(&path, self.rope.to_string())?;
+        fs::write(&path, self.serialized_contents())?;
         self.title = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -197,6 +287,18 @@ impl Editor {
         self.file_path = Some(path);
         self.modified = false;
         Ok(())
+    }
+
+    fn serialized_contents(&self) -> String {
+        let mut content = self.rope.to_string();
+        if self.line_ending == LineEnding::CrLf {
+            content = content.replace('\n', "\r\n");
+        }
+        if self.encoding == TextEncoding::Utf8Bom {
+            format!("\u{FEFF}{}", content)
+        } else {
+            content
+        }
     }
 
     // --- Undo/Redo ---
@@ -377,7 +479,13 @@ impl Editor {
     }
 
     pub fn insert_tab(&mut self) {
-        self.insert_text("    ");
+        match self.indent_style {
+            IndentStyle::Tabs => self.insert_text("\t"),
+            IndentStyle::Spaces => {
+                let spaces = " ".repeat(self.indent_width.max(1));
+                self.insert_text(&spaces);
+            }
+        }
     }
 
     // --- Cursor movement ---
@@ -807,11 +915,6 @@ impl Editor {
             Position::new(cursor.pos.line, start),
             Position::new(cursor.pos.line, end),
         )
-    }
-
-    pub fn clear_extra_cursors(&mut self) {
-        self.cursors.truncate(1);
-        self.cursors[0].anchor = None;
     }
 
     // --- Selection helpers ---

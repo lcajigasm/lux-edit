@@ -14,7 +14,6 @@
 - Allow checkout, merge, rebase, stash operations directly from the UI.
 
 ## Command Palette & Menus
-- Implement fuzzy scoring with prioritization, categories, and history.
 - Allow extensions to register commands and palette providers.
 - Expose palette actions for Git, debugging, tasks, and custom scripts.
 

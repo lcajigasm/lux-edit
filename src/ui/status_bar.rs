@@ -1,6 +1,6 @@
 use eframe::egui;
 
-use crate::editor::Editor;
+use crate::editor::{Editor, IndentStyle, LineEnding, TextEncoding};
 
 const BAR_HEIGHT: f32 = 22.0;
 const BAR_ITEM_HOVER_ALPHA: u8 = 30;
@@ -16,7 +16,7 @@ pub struct GitInfo {
     pub dirty: bool,
 }
 
-pub fn show(ui: &mut egui::Ui, editor: &Editor, git_info: Option<&GitInfo>) {
+pub fn show(ui: &mut egui::Ui, editor: &mut Editor, git_info: Option<&GitInfo>) {
     let rect = ui.available_rect_before_wrap();
     let bar_rect = egui::Rect::from_min_size(
         egui::Pos2::new(rect.left(), rect.bottom() - BAR_HEIGHT),
@@ -63,11 +63,122 @@ pub fn show(ui: &mut egui::Ui, editor: &Editor, git_info: Option<&GitInfo>) {
         } else {
             format!("Ln {}, Col {}", primary.pos.line + 1, primary.pos.col + 1)
         };
-        status_item(ui, &cursor_text);
+        let _ = status_item(ui, &cursor_text);
 
-        // Encoding / Spaces
-        status_item(ui, "UTF-8"); // Placeholder
-        status_item(ui, "Spaces: 4"); // Placeholder
+        // Encoding
+        let encoding_label = match editor.encoding {
+            TextEncoding::Utf8 => "UTF-8",
+            TextEncoding::Utf8Bom => "UTF-8 BOM",
+        };
+        let encoding_resp = status_item(ui, encoding_label);
+        if encoding_resp.clicked() {
+            editor.encoding = match editor.encoding {
+                TextEncoding::Utf8 => TextEncoding::Utf8Bom,
+                TextEncoding::Utf8Bom => TextEncoding::Utf8,
+            };
+        }
+        encoding_resp.context_menu(|ui| {
+            let mut set = None;
+            if ui
+                .selectable_label(editor.encoding == TextEncoding::Utf8, "UTF-8")
+                .clicked()
+            {
+                set = Some(TextEncoding::Utf8);
+            }
+            if ui
+                .selectable_label(editor.encoding == TextEncoding::Utf8Bom, "UTF-8 BOM")
+                .clicked()
+            {
+                set = Some(TextEncoding::Utf8Bom);
+            }
+            if let Some(val) = set {
+                editor.encoding = val;
+                ui.close_menu();
+            }
+        });
+
+        // Line endings
+        let eol_label = match editor.line_ending {
+            LineEnding::Lf => "LF",
+            LineEnding::CrLf => "CRLF",
+        };
+        let eol_resp = status_item(ui, eol_label);
+        if eol_resp.clicked() {
+            editor.line_ending = match editor.line_ending {
+                LineEnding::Lf => LineEnding::CrLf,
+                LineEnding::CrLf => LineEnding::Lf,
+            };
+        }
+        eol_resp.context_menu(|ui| {
+            let mut set = None;
+            if ui
+                .selectable_label(editor.line_ending == LineEnding::Lf, "LF")
+                .clicked()
+            {
+                set = Some(LineEnding::Lf);
+            }
+            if ui
+                .selectable_label(editor.line_ending == LineEnding::CrLf, "CRLF")
+                .clicked()
+            {
+                set = Some(LineEnding::CrLf);
+            }
+            if let Some(val) = set {
+                editor.line_ending = val;
+                ui.close_menu();
+            }
+        });
+
+        // Indentation
+        let indent_label = match editor.indent_style {
+            IndentStyle::Spaces => format!("Spaces: {}", editor.indent_width.max(1)),
+            IndentStyle::Tabs => format!("Tabs: {}", editor.indent_width.max(1)),
+        };
+        let indent_resp = status_item(ui, &indent_label);
+        if indent_resp.clicked() {
+            editor.indent_style = match editor.indent_style {
+                IndentStyle::Spaces => IndentStyle::Tabs,
+                IndentStyle::Tabs => IndentStyle::Spaces,
+            };
+        }
+        indent_resp.context_menu(|ui| {
+            let mut new_style = None;
+            if ui
+                .selectable_label(editor.indent_style == IndentStyle::Spaces, "Spaces")
+                .clicked()
+            {
+                new_style = Some(IndentStyle::Spaces);
+            }
+            if ui
+                .selectable_label(editor.indent_style == IndentStyle::Tabs, "Tabs")
+                .clicked()
+            {
+                new_style = Some(IndentStyle::Tabs);
+            }
+            if let Some(style) = new_style {
+                editor.indent_style = style;
+                if editor.indent_width == 0 {
+                    editor.indent_width = 4;
+                }
+                ui.close_menu();
+            }
+            ui.separator();
+            ui.label("Indent width");
+            let mut set_width = None;
+            for width in [2usize, 4, 8] {
+                let label = format!("{}", width);
+                if ui
+                    .selectable_label(editor.indent_width == width, label)
+                    .clicked()
+                {
+                    set_width = Some(width);
+                }
+            }
+            if let Some(width) = set_width {
+                editor.indent_width = width;
+                ui.close_menu();
+            }
+        });
 
         // Language
          let syntax = editor
@@ -76,11 +187,11 @@ pub fn show(ui: &mut egui::Ui, editor: &Editor, git_info: Option<&GitInfo>) {
             .and_then(|p| p.extension().and_then(|e| e.to_str()))
             .map(|ext| ext.to_uppercase())
             .unwrap_or_else(|| "PLAIN TEXT".into());
-        status_item(ui, &syntax);
+        let _ = status_item(ui, &syntax);
     });
 }
 
-fn status_item(ui: &mut egui::Ui, text: &str) {
+fn status_item(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let font = egui::FontId::proportional(12.0);
     let text_color = BAR_TEXT;
     
@@ -101,4 +212,6 @@ fn status_item(ui: &mut egui::Ui, text: &str) {
         galley,
         text_color
     );
+
+    resp
 }

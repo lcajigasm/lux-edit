@@ -41,11 +41,8 @@ impl EditorThemeKind {
 #[derive(Clone, Debug)]
 pub struct EditorTheme {
     pub background: Color32,
-    pub foreground: Color32,
     pub gutter_bg: Color32,
-    pub gutter_fg: Color32,
     pub gutter_divider: Color32,
-    pub selection_bg: Color32,
     pub gutter_padding: f32,
     pub minimap_bg: Color32,
     pub minimap_border: Color32,
@@ -64,12 +61,9 @@ impl EditorTheme {
     pub fn light() -> Self {
         Self {
             background: Color32::WHITE,
-            foreground: Color32::BLACK,
             text: Color32::BLACK,
             gutter_bg: Color32::from_rgb(245, 245, 245),
-            gutter_fg: Color32::from_rgb(150, 150, 150),
             gutter_divider: Color32::from_rgb(220, 220, 220),
-            selection_bg: Color32::from_rgb(200, 200, 255),
             selection: Color32::from_rgb(200, 200, 255),
             gutter_padding: 12.0,
             minimap_bg: Color32::from_black_alpha(10),
@@ -87,12 +81,9 @@ impl EditorTheme {
     pub fn monokai() -> Self {
         Self {
             background: Color32::from_rgb(39, 40, 34),
-            foreground: Color32::from_rgb(248, 248, 242),
             text: Color32::from_rgb(248, 248, 242),
             gutter_bg: Color32::from_rgb(39, 40, 34),
-            gutter_fg: Color32::from_rgb(144, 144, 138),
             gutter_divider: Color32::from_rgb(60, 60, 60),
-            selection_bg: Color32::from_rgb(73, 72, 62),
             selection: Color32::from_rgb(73, 72, 62),
             gutter_padding: 12.0,
             minimap_bg: Color32::from_white_alpha(10),
@@ -110,12 +101,9 @@ impl EditorTheme {
     pub fn solarized_dark() -> Self {
         Self {
             background: Color32::from_rgb(0, 43, 54),
-            foreground: Color32::from_rgb(131, 148, 150),
             text: Color32::from_rgb(131, 148, 150),
             gutter_bg: Color32::from_rgb(7, 54, 66),
-            gutter_fg: Color32::from_rgb(88, 110, 117),
             gutter_divider: Color32::from_rgb(88, 110, 117),
-            selection_bg: Color32::from_rgb(7, 54, 66),
             selection: Color32::from_rgb(7, 54, 66),
             gutter_padding: 12.0,
             minimap_bg: Color32::from_white_alpha(5),
@@ -333,19 +321,6 @@ pub fn show(
         // Actually, VS Code style: The minimap shows the whole file if it fits. If not, it behaves like a scrollbar.
         // But for a true minimap, we usually render 1:1 with fixed pixel steps and scroll it.
         
-        let editor_scroll_pct = if visible_lines.len() * metrics.line_height as usize > 0 {
-             editor.scroll_y / (visible_lines.len() as f32 * metrics.line_height).max(1.0)
-        } else {
-             0.0
-        };
-        
-        // Editor view height in lines
-        let page_lines = (editor_rect.height() / metrics.line_height).ceil() as f32;
-        
-        // Calculate how much we need to scroll the minimap to keep the visible area in view.
-        // Minimap visible window size (in lines)
-        let minimap_lines_fit = (available_minimap_height / MINIMAP_LINE_HEIGHT).floor() as f32;
-        
         let mut minimap_scroll_y = 0.0;
         
         if total_minimap_height > available_minimap_height {
@@ -454,7 +429,6 @@ pub struct EditorMetrics {
     pub line_height: f32,
     pub char_width: f32,
     pub gutter_width: f32,
-    pub gutter_padding: f32,
 }
 
 impl EditorMetrics {
@@ -471,7 +445,6 @@ impl EditorMetrics {
             line_height,
             char_width,
             gutter_width,
-            gutter_padding: gutter_padding,
         }
     }
 }
@@ -935,169 +908,6 @@ fn render_lines(
         }
     }
 }
-
-fn render_minimap(
-    ui: &egui::Ui,
-    rect: Rect,
-    editor: &Editor,
-    theme: &EditorTheme,
-    visible_lines: usize,
-    line_height: f32,
-    tokens: &[Vec<StyledToken>],
-    search_query: Option<&str>,
-    diff_hunks: &[DiffHunk],
-    fold_map: &std::collections::HashMap<usize, usize>,
-) {
-    let line_count = editor.line_count();
-    if line_count == 0 {
-        return;
-    }
-
-    let painter = ui.painter_at(rect);
-    let minimap_line_height = (rect.height() / line_count.max(1) as f32).clamp(1.0, 4.0);
-    let opacity = editor.minimap_opacity.clamp(0.2, 1.0);
-
-    let mut max_cols = 1usize;
-    for line in 0..line_count {
-        let len = editor.line_text(line).chars().count();
-        if len > max_cols {
-            max_cols = len;
-        }
-    }
-    let max_cols = max_cols.max(1) as f32;
-
-    for (line_idx, token_line) in tokens.iter().enumerate() {
-        if line_idx >= line_count {
-            break;
-        }
-        let y = rect.top() + line_idx as f32 * minimap_line_height;
-        let mut x = rect.left();
-        for token in token_line {
-            let chars = token.text.chars().count() as f32;
-            if chars <= 0.0 {
-                continue;
-            }
-            let width = (chars / max_cols).max(0.002) * rect.width();
-            let color = tint_for_minimap(token.color, theme, opacity);
-            painter.rect_filled(
-                Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, minimap_line_height)),
-                0.5,
-                color,
-            );
-            x += width;
-        }
-    }
-
-    if let Some(query) = search_query {
-        if !query.is_empty() {
-            for line_idx in 0..line_count {
-                let line_text = editor.line_text(line_idx);
-                if line_text.contains(query) {
-                    let y = rect.top() + line_idx as f32 * minimap_line_height;
-                    let marker = Rect::from_min_size(
-                        Pos2::new(rect.left(), y),
-                        Vec2::new(rect.width(), minimap_line_height.max(1.0)),
-                    );
-                    painter.rect_filled(
-                        marker,
-                        0.0,
-                        apply_minimap_opacity(theme.search_match, opacity * 0.8),
-                    );
-                }
-            }
-        }
-    }
-
-    if let Some((sel_start, sel_end)) = editor.cursors[0].selection_ordered() {
-        let start = sel_start.line.min(sel_end.line);
-        let end = sel_end.line.max(sel_start.line);
-        let y1 = rect.top() + start as f32 * minimap_line_height;
-        let y2 = rect.top() + (end + 1) as f32 * minimap_line_height;
-        let selection_rect = Rect::from_min_size(
-            Pos2::new(rect.left(), y1),
-            Vec2::new(rect.width(), (y2 - y1).max(minimap_line_height)),
-        );
-        painter.rect_filled(
-            selection_rect,
-            2.0,
-            apply_minimap_opacity(theme.selection, opacity * 0.7),
-        );
-    }
-
-    if !diff_hunks.is_empty() {
-        for hunk in diff_hunks {
-            if hunk.start >= line_count {
-                continue;
-            }
-            let start = hunk.start.min(line_count.saturating_sub(1));
-            let end = hunk.end.min(line_count.saturating_sub(1));
-            let y1 = rect.top() + start as f32 * minimap_line_height;
-            let y2 = rect.top() + (end + 1) as f32 * minimap_line_height;
-            let color = match hunk.kind {
-                DiffKind::Added => Color32::from_rgb(75, 185, 116),
-                DiffKind::Removed => Color32::from_rgb(214, 90, 90),
-                DiffKind::Modified => Color32::from_rgb(220, 170, 80),
-            };
-            let marker = Rect::from_min_size(
-                Pos2::new(rect.right() - 4.0, y1),
-                Vec2::new(3.0, (y2 - y1).max(minimap_line_height)),
-            );
-            painter.rect_filled(marker, 1.0, apply_minimap_opacity(color, opacity));
-        }
-    }
-
-    if !fold_map.is_empty() {
-        let marker_x = rect.right() - 9.0;
-        for (start, end) in fold_map {
-            if *end <= *start + 1 {
-                continue;
-            }
-            let y = rect.top() + *start as f32 * minimap_line_height + minimap_line_height / 2.0;
-            let collapsed = editor.folded_lines.contains(start);
-            let points = if collapsed {
-                vec![
-                    Pos2::new(marker_x - 2.0, y - 3.0),
-                    Pos2::new(marker_x - 2.0, y + 3.0),
-                    Pos2::new(marker_x + 3.0, y),
-                ]
-            } else {
-                vec![
-                    Pos2::new(marker_x - 3.0, y - 2.0),
-                    Pos2::new(marker_x + 3.0, y - 2.0),
-                    Pos2::new(marker_x, y + 3.0),
-                ]
-            };
-            let color = if collapsed {
-                Color32::from_rgb(140, 140, 140)
-            } else {
-                Color32::from_rgb(175, 175, 175)
-            };
-            painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
-        }
-    }
-
-    let viewport_top = rect.top() + (editor.scroll_y / line_height) * minimap_line_height;
-    let viewport_height = (visible_lines as f32 * minimap_line_height).min(rect.height());
-    let viewport = Rect::from_min_size(
-        Pos2::new(
-            rect.left(),
-            viewport_top.clamp(rect.top(), rect.bottom() - viewport_height),
-        ),
-        Vec2::new(rect.width(), viewport_height.max(minimap_line_height)),
-    );
-
-    painter.rect_filled(
-        viewport,
-        3.0,
-        apply_minimap_opacity(theme.minimap_viewport, opacity),
-    );
-    painter.rect_stroke(
-        viewport,
-        3.0,
-        Stroke::new(1.0, apply_minimap_opacity(theme.minimap_border, opacity)),
-    );
-}
-
 
 
 fn draw_selection(

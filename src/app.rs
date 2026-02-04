@@ -15,7 +15,6 @@ const MENU_STROKE: egui::Stroke = egui::Stroke {
     color: egui::Color32::from_rgb(65, 65, 67),
 };
 const TAB_BAR_BG: egui::Color32 = egui::Color32::from_rgb(25, 25, 26);
-const TAB_BAR_BORDER: egui::Color32 = egui::Color32::from_rgb(0, 0, 0); // Clear separation
 const TAB_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 38); // Should match generic editor bg
 const TAB_INACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 48);
 const TAB_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(50, 50, 53);
@@ -473,9 +472,12 @@ impl LuxApp {
                     });
 
                     ui.menu_button(rich_label("Theme"), |ui| {
-                        for theme_option in
-                            [EditorThemeKind::Monokai, EditorThemeKind::SolarizedDark]
-                        {
+                        for theme_option in [
+                            EditorThemeKind::Dark,
+                            EditorThemeKind::Light,
+                            EditorThemeKind::Monokai,
+                            EditorThemeKind::SolarizedDark,
+                        ] {
                             let selected = self.editor_theme == theme_option;
                             let label = theme_option.name();
                             if ui.selectable_label(selected, label).clicked() {
@@ -529,7 +531,7 @@ impl LuxApp {
                                             .rect
                                             .width()
                                     });
-                                    let mut tab_width =
+                                    let tab_width =
                                         text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 8.0;
                                     if self.editors.len() <= 1 {
                                        // Even single tab might want a close button in modern designs, 
@@ -943,6 +945,7 @@ impl eframe::App for LuxApp {
 
         // Command palette (rendered as overlay)
         if let Some(cmd) = self.command_palette.show(ctx) {
+            self.command_palette.register_use(cmd);
             self.handle_command(cmd);
         }
 
@@ -1002,7 +1005,11 @@ impl eframe::App for LuxApp {
                 );
 
                 // Status bar
-                crate::ui::status_bar::show(ui, &self.editors[self.active_tab], self.git_info.as_ref());
+                crate::ui::status_bar::show(
+                    ui,
+                    &mut self.editors[self.active_tab],
+                    self.git_info.as_ref(),
+                );
             });
 
         // Unsaved changes confirmation dialog
@@ -1086,11 +1093,26 @@ fn find_drop_target(
 }
 
 fn read_git_info(cwd: Option<&Path>) -> Option<crate::ui::status_bar::GitInfo> {
+    let cwd = cwd?;
+
+    let mut rev_cmd = Command::new("git");
+    rev_cmd.arg("rev-parse").arg("--show-toplevel").current_dir(cwd);
+    let rev_output = rev_cmd.output().ok()?;
+    if !rev_output.status.success() {
+        return None;
+    }
+    let toplevel = String::from_utf8_lossy(&rev_output.stdout).trim().to_string();
+    if toplevel.is_empty() {
+        return None;
+    }
+    let toplevel = Path::new(&toplevel);
+    if !cwd.starts_with(toplevel) {
+        return None;
+    }
+
     let mut cmd = Command::new("git");
     cmd.arg("status").arg("-sb");
-    if let Some(path) = cwd {
-        cmd.current_dir(path);
-    }
+    cmd.current_dir(cwd);
     let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
