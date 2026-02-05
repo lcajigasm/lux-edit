@@ -1,6 +1,7 @@
 use eframe::egui;
 
 use crate::editor::{Editor, IndentStyle, LineEnding, TextEncoding};
+use crate::syntax::SyntaxHighlighter;
 
 const BAR_HEIGHT: f32 = 22.0;
 const BAR_ITEM_HOVER_ALPHA: u8 = 30;
@@ -16,7 +17,12 @@ pub struct GitInfo {
     pub dirty: bool,
 }
 
-pub fn show(ui: &mut egui::Ui, editor: &mut Editor, git_info: Option<&GitInfo>) {
+pub fn show(
+    ui: &mut egui::Ui,
+    editor: &mut Editor,
+    git_info: Option<&GitInfo>,
+    highlighter: &SyntaxHighlighter,
+) {
     let rect = ui.available_rect_before_wrap();
     let bar_rect = egui::Rect::from_min_size(
         egui::Pos2::new(rect.left(), rect.bottom() - BAR_HEIGHT),
@@ -180,14 +186,70 @@ pub fn show(ui: &mut egui::Ui, editor: &mut Editor, git_info: Option<&GitInfo>) 
             }
         });
 
+        // Markdown preview toggle
+        if editor.is_markdown() {
+            let label = if editor.markdown_preview {
+                "Preview: On"
+            } else {
+                "Preview: Off"
+            };
+            let preview_resp = status_item(ui, label);
+            if preview_resp.clicked() {
+                editor.markdown_preview = !editor.markdown_preview;
+            }
+        }
+
         // Language
-         let syntax = editor
-            .file_path
-            .as_ref()
-            .and_then(|p| p.extension().and_then(|e| e.to_str()))
-            .map(|ext| ext.to_uppercase())
-            .unwrap_or_else(|| "PLAIN TEXT".into());
-        let _ = status_item(ui, &syntax);
+        let first_line = editor.first_line_text();
+        let syntax_label = highlighter.syntax_name_for(
+            editor.file_path.as_deref(),
+            first_line.as_deref(),
+            editor.syntax_override.as_deref(),
+        );
+        let lang_resp = status_item(ui, &syntax_label);
+        let popup_id = ui.make_persistent_id("syntax_picker_popup");
+        if lang_resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &lang_resp,
+            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+            |ui: &mut egui::Ui| {
+            ui.set_min_width(220.0);
+            if ui
+                .selectable_label(editor.syntax_override.is_none(), "Auto (Detect)")
+                .clicked()
+            {
+                editor.syntax_override = None;
+                ui.close_menu();
+            }
+            ui.separator();
+            let mut syntaxes = highlighter.available_syntaxes();
+            if !syntaxes
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case("Plain Text"))
+            {
+                syntaxes.insert(0, "Plain Text".into());
+            }
+            egui::ScrollArea::vertical()
+                .max_height(260.0)
+                .show(ui, |ui| {
+                    for name in syntaxes {
+                        let selected = editor
+                            .syntax_override
+                            .as_deref()
+                            .map(|v| v == name.as_str())
+                            .unwrap_or(false);
+                        if ui.selectable_label(selected, &name).clicked() {
+                            editor.syntax_override = Some(name.clone());
+                            ui.close_menu();
+                        }
+                    }
+                });
+            },
+        );
     });
 }
 

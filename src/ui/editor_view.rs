@@ -305,6 +305,7 @@ pub fn show(
         let minimap_tokens = highlighter.highlight_lines(
             &full_text,
             editor.file_path.as_deref(),
+            editor.syntax_override.as_deref(),
             0,
             editor.line_count(),
         );
@@ -481,7 +482,7 @@ fn screen_to_editor_pos(
 fn handle_keyboard(
     ui: &egui::Ui,
     editor: &mut Editor,
-    _clipboard: &mut Option<Clipboard>,
+    clipboard: &mut Option<Clipboard>,
     visible_lines_count: usize,
     _line_height: f32,
 ) -> bool {
@@ -496,11 +497,82 @@ fn handle_keyboard(
                     changed = true;
                 }
             }
+            egui::Event::Copy => {
+                let text = editor.copy_text();
+                ui.ctx().output_mut(|o| o.copied_text = text.clone());
+                if let Some(cb) = clipboard.as_mut() {
+                    let _ = cb.set_text(&text);
+                }
+            }
+            egui::Event::Cut => {
+                let text = editor.cut_text();
+                ui.ctx().output_mut(|o| o.copied_text = text.clone());
+                if let Some(cb) = clipboard.as_mut() {
+                    let _ = cb.set_text(&text);
+                }
+                changed = true;
+            }
+            egui::Event::Paste(text) => {
+                if !text.is_empty() {
+                    editor.insert_text(&text);
+                    changed = true;
+                }
+            }
             egui::Event::Key { key, pressed: true, modifiers, .. } => {
                 match key {
                     egui::Key::Enter => {
                         editor.insert_newline();
                         changed = true;
+                    }
+                    egui::Key::D if modifiers.command => {
+                        editor.select_next_occurrence();
+                    }
+                    egui::Key::L if modifiers.command && modifiers.shift => {
+                        editor.select_all_occurrences();
+                    }
+                    egui::Key::ArrowUp if modifiers.command && modifiers.alt => {
+                        editor.add_cursors_vertical(-1);
+                    }
+                    egui::Key::ArrowDown if modifiers.command && modifiers.alt => {
+                        editor.add_cursors_vertical(1);
+                    }
+                    egui::Key::Z if modifiers.command => {
+                        if modifiers.shift {
+                            editor.redo();
+                        } else {
+                            editor.undo();
+                        }
+                    }
+                    egui::Key::Y if modifiers.command => {
+                        editor.redo();
+                    }
+                    egui::Key::A if modifiers.command => {
+                        editor.select_all();
+                    }
+                    egui::Key::C if modifiers.command => {
+                        let text = editor.copy_text();
+                        if let Some(cb) = clipboard.as_mut() {
+                            let _ = cb.set_text(&text);
+                        }
+                    }
+                    egui::Key::X if modifiers.command => {
+                        let text = editor.cut_text();
+                        if let Some(cb) = clipboard.as_mut() {
+                            let _ = cb.set_text(&text);
+                        }
+                        changed = true;
+                    }
+                    egui::Key::V if modifiers.command => {
+                        let mut paste = None;
+                        if let Some(cb) = clipboard.as_mut() {
+                            if let Ok(text) = cb.get_text() {
+                                paste = Some(text);
+                            }
+                        }
+                        if let Some(text) = paste {
+                            editor.insert_text(&text);
+                            changed = true;
+                        }
                     }
                     egui::Key::Backspace => {
                         if modifiers.alt || modifiers.mac_cmd {
@@ -770,6 +842,7 @@ fn render_lines(
     let highlighted = highlighter.highlight_lines(
         full_text,
         editor.file_path.as_deref(),
+        editor.syntax_override.as_deref(),
         0,
         editor.line_count(),
     );

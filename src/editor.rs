@@ -118,6 +118,8 @@ pub struct Editor {
     pub minimap_enabled: bool,
     pub minimap_width: f32,
     pub minimap_opacity: f32,
+    pub markdown_preview: bool,
+    pub syntax_override: Option<String>,
     pub diff_hunks: Vec<DiffHunk>,
     pub diff_last_check: f64,
     pub indent_style: IndentStyle,
@@ -214,6 +216,8 @@ impl Editor {
             minimap_enabled: true,
             minimap_width: 120.0,
             minimap_opacity: 0.9,
+            markdown_preview: false,
+            syntax_override: None,
             diff_hunks: Vec::new(),
             diff_last_check: 0.0,
             indent_style: IndentStyle::Spaces,
@@ -240,6 +244,7 @@ impl Editor {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
+        let markdown_preview = is_markdown_path(Some(path.as_path()));
         Ok(Self {
             rope: Rope::from_str(&content),
             cursors: vec![Cursor::new(0, 0)],
@@ -256,6 +261,8 @@ impl Editor {
             minimap_enabled: true,
             minimap_width: 120.0,
             minimap_opacity: 0.9,
+            markdown_preview,
+            syntax_override: None,
             diff_hunks: Vec::new(),
             diff_last_check: 0.0,
             indent_style,
@@ -285,8 +292,26 @@ impl Editor {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
         self.file_path = Some(path);
+        self.markdown_preview = is_markdown_path(self.file_path.as_ref().map(|p| p.as_path()));
         self.modified = false;
         Ok(())
+    }
+
+    pub fn is_markdown(&self) -> bool {
+        is_markdown_path(self.file_path.as_ref().map(|p| p.as_path()))
+    }
+
+    pub fn first_line_text(&self) -> Option<String> {
+        if self.rope.len_lines() == 0 {
+            return None;
+        }
+        let line = self.rope.line(0).to_string();
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     }
 
     fn serialized_contents(&self) -> String {
@@ -876,6 +901,59 @@ impl Editor {
         }
     }
 
+    /// Select all occurrences of current word/selection (Ctrl+Shift+L behavior)
+    pub fn select_all_occurrences(&mut self) {
+        let primary = &self.cursors[0];
+        let search_text = if let Some((start, end)) = primary.selection_ordered() {
+            let start_ci = pos_to_char_idx(&self.rope, &start);
+            let end_ci = pos_to_char_idx(&self.rope, &end);
+            self.rope.slice(start_ci..end_ci).to_string()
+        } else {
+            self.word_at_cursor(primary)
+        };
+
+        if search_text.is_empty() {
+            return;
+        }
+
+        let full_text = self.rope.to_string();
+        let mut cursors = Vec::new();
+        let mut start = 0usize;
+        while let Some(offset) = full_text[start..].find(&search_text) {
+            let match_start_ci = start + offset;
+            let match_end_ci = match_start_ci + search_text.len();
+            let start_line = self.rope.char_to_line(match_start_ci);
+            let start_col = match_start_ci - self.rope.line_to_char(start_line);
+            let end_line = self.rope.char_to_line(match_end_ci);
+            let end_col = match_end_ci - self.rope.line_to_char(end_line);
+
+            let mut cursor = Cursor::new(end_line, end_col);
+            cursor.anchor = Some(Position::new(start_line, start_col));
+            cursors.push(cursor);
+            start = match_end_ci;
+        }
+
+        if !cursors.is_empty() {
+            self.cursors = cursors;
+        }
+    }
+
+    pub fn add_cursors_vertical(&mut self, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        let current = self.cursors.clone();
+        for cursor in current {
+            let line = if delta.is_negative() {
+                cursor.pos.line.saturating_sub(delta.wrapping_abs() as usize)
+            } else {
+                (cursor.pos.line + delta as usize).min(max_line)
+            };
+            self.add_cursor_at(line, cursor.pos.col);
+        }
+    }
+
     fn word_at_cursor(&self, cursor: &Cursor) -> String {
         let (start, end) = self.word_bounds_at_cursor(cursor);
         let start_ci = pos_to_char_idx(&self.rope, &start);
@@ -993,17 +1071,58 @@ impl Editor {
     // --- Search ---
 
     pub fn find_and_select(&mut self, query: &str) {
+        self.find_next(query);
+    }
+
+    pub fn find_next(&mut self, query: &str) {
         if query.is_empty() {
             return;
         }
+        let primary = &self.cursors[0];
+        let start_pos = primary
+            .selection_ordered()
+            .map(|(_, end)| end)
+            .unwrap_or(primary.pos);
+        let start_ci = pos_to_char_idx(&self.rope, &start_pos);
         let full = self.rope.to_string();
-        let primary_ci = pos_to_char_idx(&self.rope, &self.cursors[0].pos);
 
-        // Search forward from cursor
-        let found = full[primary_ci..]
+        let found = full[start_ci..]
             .find(query)
-            .map(|o| primary_ci + o)
-            .or_else(|| full[..primary_ci].find(query)); // Wrap around
+            .map(|o| start_ci + o)
+            .or_else(|| full[..start_ci].find(query)); // Wrap around
+
+        if let Some(match_start) = found {
+            let match_end = match_start + query.len();
+            let start_line = self.rope.char_to_line(match_start);
+            let start_col = match_start - self.rope.line_to_char(start_line);
+            let end_line = self.rope.char_to_line(match_end);
+            let end_col = match_end - self.rope.line_to_char(end_line);
+
+            self.cursors.truncate(1);
+            self.cursors[0].anchor = Some(Position::new(start_line, start_col));
+            self.cursors[0].pos = Position::new(end_line, end_col);
+            self.cursors[0].desired_col = end_col;
+
+            // Scroll to match
+            self.scroll_y = (start_line as f32 * LINE_HEIGHT).max(0.0);
+        }
+    }
+
+    pub fn find_prev(&mut self, query: &str) {
+        if query.is_empty() {
+            return;
+        }
+        let primary = &self.cursors[0];
+        let start_pos = primary
+            .selection_ordered()
+            .map(|(start, _)| start)
+            .unwrap_or(primary.pos);
+        let start_ci = pos_to_char_idx(&self.rope, &start_pos);
+        let full = self.rope.to_string();
+
+        let found = full[..start_ci]
+            .rfind(query)
+            .or_else(|| full.rfind(query)); // Wrap around
 
         if let Some(match_start) = found {
             let match_end = match_start + query.len();
@@ -1075,4 +1194,15 @@ impl Editor {
         self.cursors[0].desired_col = 0;
         self.scroll_y = (line as f32 * LINE_HEIGHT).max(0.0);
     }
+}
+
+fn is_markdown_path(path: Option<&std::path::Path>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "md" | "markdown" | "mdown" | "mkd" | "mdx"
+    )
 }

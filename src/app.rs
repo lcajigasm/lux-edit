@@ -7,6 +7,7 @@ use crate::editor::Editor;
 use crate::syntax::SyntaxHighlighter;
 use crate::ui::command_palette::{CommandId, CommandPalette};
 use crate::ui::editor_view::EditorThemeKind;
+use crate::ui::markdown_preview;
 
 const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(36, 37, 38);
 const MENU_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 47);
@@ -275,7 +276,40 @@ impl LuxApp {
         }
     }
 
+    fn cut(&mut self) {
+        let text = self.active_editor().cut_text();
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(&text);
+        }
+    }
+
+    fn copy(&mut self) {
+        let text = self.active_editor().copy_text();
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(&text);
+        }
+    }
+
+    fn paste(&mut self) {
+        let mut paste = None;
+        if let Some(cb) = self.clipboard.as_mut() {
+            if let Ok(text) = cb.get_text() {
+                paste = Some(text);
+            }
+        }
+        if let Some(text) = paste {
+            self.active_editor().insert_text(&text);
+        }
+    }
+
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let mut should_undo = false;
+        let mut should_redo = false;
+        let mut should_cut = false;
+        let mut should_copy = false;
+        let mut should_paste = false;
+        let mut should_select_all = false;
+
         ctx.input(|i| {
             let ctrl = i.modifiers.command;
             let shift = i.modifiers.shift;
@@ -305,6 +339,22 @@ impl LuxApp {
             } else if ctrl && i.key_pressed(egui::Key::G) {
                 self.show_goto_line = !self.show_goto_line;
                 self.show_search = false;
+            } else if ctrl && i.key_pressed(egui::Key::Z) {
+                if shift {
+                    should_redo = true;
+                } else {
+                    should_undo = true;
+                }
+            } else if ctrl && i.key_pressed(egui::Key::Y) {
+                should_redo = true;
+            } else if ctrl && i.key_pressed(egui::Key::A) {
+                should_select_all = true;
+            } else if ctrl && i.key_pressed(egui::Key::C) {
+                should_copy = true;
+            } else if ctrl && i.key_pressed(egui::Key::X) {
+                should_cut = true;
+            } else if ctrl && i.key_pressed(egui::Key::V) {
+                should_paste = true;
             }
         });
 
@@ -323,6 +373,24 @@ impl LuxApp {
         }
         if should_save_as {
             self.save_file_as();
+        }
+        if should_undo {
+            self.active_editor().undo();
+        }
+        if should_redo {
+            self.active_editor().redo();
+        }
+        if should_select_all {
+            self.active_editor().select_all();
+        }
+        if should_cut {
+            self.cut();
+        }
+        if should_copy {
+            self.copy();
+        }
+        if should_paste {
+            self.paste();
         }
     }
 
@@ -377,29 +445,15 @@ impl LuxApp {
                         }
                         ui.separator();
                         if ui.button("Cut\tCtrl+X").clicked() {
-                            let text = self.active_editor().cut_text();
-                            if let Some(cb) = self.clipboard.as_mut() {
-                                let _ = cb.set_text(&text);
-                            }
+                            self.cut();
                             ui.close_menu();
                         }
                         if ui.button("Copy\tCtrl+C").clicked() {
-                            let text = self.active_editor().copy_text();
-                            if let Some(cb) = self.clipboard.as_mut() {
-                                let _ = cb.set_text(&text);
-                            }
+                            self.copy();
                             ui.close_menu();
                         }
                         if ui.button("Paste\tCtrl+V").clicked() {
-                            let mut paste = None;
-                            if let Some(cb) = self.clipboard.as_mut() {
-                                if let Ok(text) = cb.get_text() {
-                                    paste = Some(text);
-                                }
-                            }
-                            if let Some(text) = paste {
-                                self.active_editor().insert_text(&text);
-                            }
+                            self.paste();
                             ui.close_menu();
                         }
                         ui.separator();
@@ -441,6 +495,20 @@ impl LuxApp {
                             ui.close_menu();
                         }
                         ui.separator();
+                        let editor_idx = self.active_tab;
+                        let (is_markdown, preview_on) = {
+                            let editor = &self.editors[editor_idx];
+                            (editor.is_markdown(), editor.markdown_preview)
+                        };
+                        if is_markdown {
+                            if ui
+                                .selectable_label(preview_on, "Markdown Preview")
+                                .clicked()
+                            {
+                                self.editors[editor_idx].markdown_preview = !preview_on;
+                                ui.close_menu();
+                            }
+                        }
                         let minimap_enabled = self.active_editor().minimap_enabled;
                         if ui
                             .selectable_label(minimap_enabled, "Toggle Minimap")
@@ -756,10 +824,23 @@ impl LuxApp {
                             .hint_text("Search..."),
                     );
 
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         let query = self.search_input.clone();
-                        self.active_editor().find_and_select(&query);
+                        if ui.input(|i| i.modifiers.shift) {
+                            self.active_editor().find_prev(&query);
+                        } else {
+                            self.active_editor().find_next(&query);
+                        }
                         response.request_focus();
+                    }
+
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("↑").size(14.0)))
+                        .on_hover_text("Previous Match")
+                        .clicked()
+                    {
+                        let query = self.search_input.clone();
+                        self.active_editor().find_prev(&query);
                     }
 
                     if ui
@@ -768,7 +849,7 @@ impl LuxApp {
                         .clicked()
                     {
                         let query = self.search_input.clone();
-                        self.active_editor().find_and_select(&query);
+                        self.active_editor().find_next(&query);
                     }
 
                     // Toggles for options could go here
@@ -978,12 +1059,17 @@ impl eframe::App for LuxApp {
                     available.min,
                     egui::Pos2::new(available.max.x, available.max.y - status_bar_height),
                 );
+                let editor_idx = self.active_tab;
+                let show_preview = {
+                    let editor = &self.editors[editor_idx];
+                    editor.is_markdown() && editor.markdown_preview
+                };
+                let preview_text = if show_preview {
+                    Some(self.editors[editor_idx].rope.to_string())
+                } else {
+                    None
+                };
 
-                let mut editor_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(editor_rect)
-                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                );
                 let auto_focus = !self.show_search
                     && !self.show_goto_line
                     && !self.command_palette.visible
@@ -994,21 +1080,80 @@ impl eframe::App for LuxApp {
                 } else {
                     Some(self.search_input.as_str())
                 };
-                crate::ui::editor_view::show(
-                    &mut editor_ui,
-                    &mut self.editors[self.active_tab],
-                    &mut self.clipboard,
-                    &self.highlighter,
-                    &editor_theme,
-                    search_query,
-                    auto_focus,
-                );
+
+                let min_editor_width = 360.0;
+                let min_preview_width = 260.0;
+                let can_split = editor_rect.width() > (min_editor_width + min_preview_width);
+
+                if show_preview && can_split {
+                    let preview_width = (editor_rect.width() * 0.42)
+                        .clamp(min_preview_width, editor_rect.width() - min_editor_width);
+                    let editor_width = editor_rect.width() - preview_width;
+                    let editor_rect = egui::Rect::from_min_max(
+                        editor_rect.min,
+                        egui::Pos2::new(editor_rect.min.x + editor_width, editor_rect.max.y),
+                    );
+                    let preview_rect = egui::Rect::from_min_max(
+                        egui::Pos2::new(editor_rect.max.x, editor_rect.min.y),
+                        egui::Pos2::new(editor_rect.max.x + preview_width, editor_rect.max.y),
+                    );
+
+                    let separator_rect = egui::Rect::from_min_max(
+                        egui::Pos2::new(preview_rect.min.x - 1.0, preview_rect.min.y),
+                        egui::Pos2::new(preview_rect.min.x, preview_rect.max.y),
+                    );
+                    ui.painter().rect_filled(
+                        separator_rect,
+                        0.0,
+                        egui::Color32::from_rgb(55, 55, 58),
+                    );
+
+                    let mut editor_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(editor_rect)
+                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    );
+                    crate::ui::editor_view::show(
+                        &mut editor_ui,
+                        &mut self.editors[self.active_tab],
+                        &mut self.clipboard,
+                        &self.highlighter,
+                        &editor_theme,
+                        search_query,
+                        auto_focus,
+                    );
+
+                    if let Some(text) = preview_text.as_deref() {
+                        let mut preview_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(preview_rect)
+                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                        );
+                        markdown_preview::show(&mut preview_ui, text);
+                    }
+                } else {
+                    let mut editor_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(editor_rect)
+                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                    );
+                    crate::ui::editor_view::show(
+                        &mut editor_ui,
+                        &mut self.editors[self.active_tab],
+                        &mut self.clipboard,
+                        &self.highlighter,
+                        &editor_theme,
+                        search_query,
+                        auto_focus,
+                    );
+                }
 
                 // Status bar
                 crate::ui::status_bar::show(
                     ui,
                     &mut self.editors[self.active_tab],
                     self.git_info.as_ref(),
+                    &self.highlighter,
                 );
             });
 
