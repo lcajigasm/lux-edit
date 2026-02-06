@@ -486,11 +486,11 @@ fn fuzzy_score(text: &str, query: &str) -> Option<i32> {
     let mut qi = 0usize;
     let mut last_match: Option<usize> = None;
 
-    for i in 0..text_lower.len() {
+    for (i, ch) in text_lower.iter().enumerate() {
         if qi >= query_chars.len() {
             break;
         }
-        if text_lower[i] == query_chars[qi] {
+        if *ch == query_chars[qi] {
             score += 12;
             if let Some(prev) = last_match {
                 if i == prev + 1 {

@@ -713,18 +713,16 @@ impl LuxApp {
                 }
             }
             self.split_secondary_tab = Some(idx);
-        } else {
-            if self.split_secondary_tab == Some(idx) {
-                let previous_primary = self.active_tab;
-                self.active_tab = idx;
-                if previous_primary != idx {
-                    self.split_secondary_tab = Some(previous_primary);
-                } else {
-                    self.split_secondary_tab = None;
-                }
+        } else if self.split_secondary_tab == Some(idx) {
+            let previous_primary = self.active_tab;
+            self.active_tab = idx;
+            if previous_primary != idx {
+                self.split_secondary_tab = Some(previous_primary);
             } else {
-                self.active_tab = idx;
+                self.split_secondary_tab = None;
             }
+        } else {
+            self.active_tab = idx;
         }
         self.ensure_split_secondary();
     }
@@ -749,7 +747,7 @@ impl LuxApp {
             .get(self.active_tab)
             .and_then(|e| e.file_path.as_ref())
             .and_then(|p| p.parent())
-            .and_then(|cwd| resolve_git_root(cwd))
+            .and_then(resolve_git_root)
     }
 
     fn active_workspace_key(&self) -> PathBuf {
@@ -842,12 +840,12 @@ impl LuxApp {
                     if ui.button("Refresh").clicked() {
                         self.git_panel.last_refresh = 0.0;
                     }
-                    if ui.button("Commit").clicked() {
-                        if !self.git_panel.commit_message.trim().is_empty() {
-                            let _ = git_commit(&repo, self.git_panel.commit_message.trim());
-                            self.git_panel.commit_message.clear();
-                            self.git_panel.last_refresh = 0.0;
-                        }
+                    if ui.button("Commit").clicked()
+                        && !self.git_panel.commit_message.trim().is_empty()
+                    {
+                        let _ = git_commit(&repo, self.git_panel.commit_message.trim());
+                        self.git_panel.commit_message.clear();
+                        self.git_panel.last_refresh = 0.0;
                     }
                 });
                 ui.add(
@@ -1071,8 +1069,8 @@ impl LuxApp {
         let start = line_num.saturating_sub(2);
         let end = (line_num + 3).min(lines.len());
         let mut preview = String::new();
-        for idx in start..end {
-            preview.push_str(&format!("{:>4}  {}\n", idx + 1, lines[idx]));
+        for (idx, line) in lines.iter().enumerate().take(end).skip(start) {
+            preview.push_str(&format!("{:>4}  {}\n", idx + 1, line));
         }
         self.sidebar_search_preview = preview;
     }
@@ -1528,14 +1526,13 @@ impl LuxApp {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Search ignore pattern");
-                            if ui.button("+ target/**").clicked() {
-                                if !self
+                            if ui.button("+ target/**").clicked()
+                                && !self
                                     .project_gitignore_patterns
                                     .contains(&"target/**".to_string())
-                                {
-                                    self.project_gitignore_patterns
-                                        .push("target/**".to_string());
-                                }
+                            {
+                                self.project_gitignore_patterns
+                                    .push("target/**".to_string());
                             }
                         });
                         ui.add(
@@ -2315,7 +2312,7 @@ impl LuxApp {
                     }
                     if output.request.want_formatting {
                         if let Some(formatted) = output.snapshot.formatted_text {
-                            if formatted != editor.rope.to_string() {
+                            if formatted != editor.rope {
                                 editor.set_document_text(&formatted);
                             }
                         }
@@ -3757,14 +3754,13 @@ impl LuxApp {
                             let editor = &self.editors[editor_idx];
                             (editor.is_markdown(), editor.markdown_preview)
                         };
-                        if is_markdown {
-                            if ui
+                        if is_markdown
+                            && ui
                                 .selectable_label(preview_on, "Markdown Preview")
                                 .clicked()
-                            {
-                                self.editors[editor_idx].markdown_preview = !preview_on;
-                                ui.close_menu();
-                            }
+                        {
+                            self.editors[editor_idx].markdown_preview = !preview_on;
+                            ui.close_menu();
                         }
                         let minimap_enabled = self.active_editor().minimap_enabled;
                         if ui
@@ -4979,11 +4975,9 @@ impl eframe::App for LuxApp {
                     });
                 });
             if let Some(reload) = decision {
-                if reload {
-                    if prompt.tab_idx < self.editors.len() {
-                        if let Ok(reloaded) = Editor::from_file(prompt.path.clone()) {
-                            self.editors[prompt.tab_idx] = reloaded;
-                        }
+                if reload && prompt.tab_idx < self.editors.len() {
+                    if let Ok(reloaded) = Editor::from_file(prompt.path.clone()) {
+                        self.editors[prompt.tab_idx] = reloaded;
                     }
                 }
                 self.pending_external_change = None;

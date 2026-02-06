@@ -157,6 +157,7 @@ impl EditorTheme {
 }
 
 /// Renders the editor area and handles input. Returns true if content changed.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     editor: &mut Editor,
@@ -374,7 +375,7 @@ pub fn show(
             // Scrollable minimap
             // We want the "viewport" (current view) to be visible.
             // Current top line in editor
-            let current_top_line = (editor.scroll_y / metrics.line_height).floor() as f32;
+            let current_top_line = (editor.scroll_y / metrics.line_height).floor();
 
             // Try to keep the viewport centered
             let target_center = current_top_line * MINIMAP_LINE_HEIGHT;
@@ -851,6 +852,7 @@ fn parse_diff_range(input: &str) -> (usize, usize) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_minimap_fixed(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -988,6 +990,7 @@ fn render_minimap_fixed(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_lines(
     ui: &egui::Ui,
     rect: &Rect,
@@ -1009,7 +1012,7 @@ fn render_lines(
     let time = ui.input(|i| i.time);
 
     let since_edit = time - editor.last_edit_time;
-    let cursor_visible = since_edit < 0.5 || ((since_edit * 2.0) as u64 % 2 == 0);
+    let cursor_visible = since_edit < 0.5 || ((since_edit * 2.0) as u64).is_multiple_of(2);
 
     let first_line = (editor.scroll_y / metrics.line_height).floor() as usize;
     let visible_count = (rect.height() / metrics.line_height).ceil() as usize + 1;
@@ -1057,8 +1060,13 @@ fn render_lines(
 
     draw_column_rulers(&painter, rect, metrics, editor);
 
-    for vis_idx in first_line..last_line {
-        let line_idx = visible_lines[vis_idx];
+    for (vis_idx, line_idx) in visible_lines
+        .iter()
+        .enumerate()
+        .take(last_line)
+        .skip(first_line)
+    {
+        let line_idx = *line_idx;
         let y = rect.top() + (vis_idx as f32) * metrics.line_height - editor.scroll_y;
 
         if let Some(label) = code_lens_by_line.get(&line_idx) {
@@ -1427,6 +1435,7 @@ fn draw_completion_popup(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_selection(
     painter: &egui::Painter,
     rect: &Rect,
@@ -1466,6 +1475,7 @@ fn draw_selection(
     painter.rect_filled(sel_rect, 0.0, theme.selection);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_search_matches(
     painter: &egui::Painter,
     rect: &Rect,

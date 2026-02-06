@@ -100,9 +100,9 @@ impl Cursor {
     pub fn selection_ordered(&self) -> Option<(Position, Position)> {
         self.anchor.as_ref().map(|anchor| {
             if self.pos <= *anchor {
-                (self.pos.clone(), anchor.clone())
+                (self.pos, *anchor)
             } else {
-                (anchor.clone(), self.pos.clone())
+                (*anchor, self.pos)
             }
         })
     }
@@ -249,7 +249,7 @@ fn detect_indent_style(content: &str) -> (IndentStyle, usize) {
 
     let mut best = 4usize;
     for candidate in [2usize, 4, 8] {
-        if space_indents.iter().any(|v| *v == candidate) {
+        if space_indents.contains(&candidate) {
             best = candidate;
             break;
         }
@@ -390,13 +390,13 @@ impl Editor {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into());
         self.file_path = Some(path);
-        self.markdown_preview = is_markdown_path(self.file_path.as_ref().map(|p| p.as_path()));
+        self.markdown_preview = is_markdown_path(self.file_path.as_deref());
         self.modified = false;
         Ok(())
     }
 
     pub fn is_markdown(&self) -> bool {
-        is_markdown_path(self.file_path.as_ref().map(|p| p.as_path()))
+        is_markdown_path(self.file_path.as_deref())
     }
 
     pub fn first_line_text(&self) -> Option<String> {
@@ -704,11 +704,11 @@ impl Editor {
         let rope = &self.rope;
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 // If there's a selection and not extending, collapse to start
                 if let Some(anchor) = cursor.anchor.take() {
-                    cursor.pos = cursor.pos.clone().min(anchor);
+                    cursor.pos = cursor.pos.min(anchor);
                     cursor.desired_col = cursor.pos.col;
                     continue;
                 }
@@ -728,10 +728,10 @@ impl Editor {
         let rope = &self.rope;
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 if let Some(anchor) = cursor.anchor.take() {
-                    cursor.pos = cursor.pos.clone().max(anchor);
+                    cursor.pos = cursor.pos.max(anchor);
                     cursor.desired_col = cursor.pos.col;
                     continue;
                 }
@@ -752,7 +752,7 @@ impl Editor {
         let rope = &self.rope;
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 cursor.anchor = None;
             }
@@ -769,7 +769,7 @@ impl Editor {
         let rope = &self.rope;
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 cursor.anchor = None;
             }
@@ -785,7 +785,7 @@ impl Editor {
     pub fn move_home(&mut self, select: bool) {
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 cursor.anchor = None;
             }
@@ -798,7 +798,7 @@ impl Editor {
         let rope = &self.rope;
         for cursor in &mut self.cursors {
             if select && cursor.anchor.is_none() {
-                cursor.anchor = Some(cursor.pos.clone());
+                cursor.anchor = Some(cursor.pos);
             } else if !select {
                 cursor.anchor = None;
             }
@@ -887,7 +887,7 @@ impl Editor {
                 while col > 0
                     && chars
                         .get(col - 1)
-                        .map_or(false, |c| !c.is_alphanumeric() && *c != '_')
+                        .is_some_and(|c| !c.is_alphanumeric() && *c != '_')
                 {
                     col -= 1;
                 }
@@ -895,7 +895,7 @@ impl Editor {
                 while col > 0
                     && chars
                         .get(col - 1)
-                        .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                        .is_some_and(|c| c.is_alphanumeric() || *c == '_')
                 {
                     col -= 1;
                 }
@@ -967,14 +967,14 @@ impl Editor {
                 while col > 0
                     && chars
                         .get(col - 1)
-                        .map_or(false, |c| !c.is_alphanumeric() && *c != '_')
+                        .is_some_and(|c| !c.is_alphanumeric() && *c != '_')
                 {
                     col -= 1;
                 }
                 while col > 0
                     && chars
                         .get(col - 1)
-                        .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                        .is_some_and(|c| c.is_alphanumeric() || *c == '_')
                 {
                     col -= 1;
                 }
@@ -1161,13 +1161,13 @@ impl Editor {
         let col = cursor.pos.col.min(chars.len());
 
         if chars.is_empty() || col >= chars.len() {
-            return (cursor.pos.clone(), cursor.pos.clone());
+            return (cursor.pos, cursor.pos);
         }
 
         let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
 
         if !is_word_char(chars[col]) {
-            return (cursor.pos.clone(), Position::new(cursor.pos.line, col + 1));
+            return (cursor.pos, Position::new(cursor.pos.line, col + 1));
         }
 
         let mut start = col;
@@ -1381,7 +1381,7 @@ impl Editor {
         let end = *import_indices.last().unwrap_or(&0);
         lines.splice(start..=end, imports);
         let new_content = lines.join("\n") + "\n";
-        if new_content == self.rope.to_string() {
+        if new_content == self.rope {
             return false;
         }
         self.set_document_text(&new_content);
@@ -1726,7 +1726,7 @@ fn strip_snippet_placeholders(input: &str) -> String {
                         break;
                     }
                     if c == ':' {
-                        while let Some(fallback) = chars.next() {
+                        for fallback in chars.by_ref() {
                             if fallback == '}' {
                                 break;
                             }
