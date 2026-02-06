@@ -52,7 +52,11 @@ pub fn load_plugin_manifests(workspace: &Path) -> Vec<PluginManifest> {
 }
 
 fn parse_manifest(value: serde_json::Value, path: PathBuf) -> PluginManifest {
-    let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let name = value
         .get("name")
         .and_then(|v| v.as_str())
@@ -64,7 +68,11 @@ fn parse_manifest(value: serde_json::Value, path: PathBuf) -> PluginManifest {
         .map(|arr| {
             arr.iter()
                 .map(|v| PluginCommand {
-                    id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    id: v
+                        .get("id")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     title: v
                         .get("title")
                         .and_then(|x| x.as_str())
@@ -119,7 +127,11 @@ pub fn load_registry(workspace: &Path) -> Vec<RegistryEntry> {
         .map(|arr| {
             arr.iter()
                 .map(|p| RegistryEntry {
-                    id: p.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    id: p
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     name: p
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -137,7 +149,10 @@ pub fn load_registry(workspace: &Path) -> Vec<RegistryEntry> {
         .unwrap_or_default()
 }
 
-pub fn install_or_update_registry_plugin(workspace: &Path, entry: &RegistryEntry) -> Result<(), String> {
+pub fn install_or_update_registry_plugin(
+    workspace: &Path,
+    entry: &RegistryEntry,
+) -> Result<(), String> {
     let source = PathBuf::from(&entry.source_manifest);
     if !source.exists() {
         return Err("source manifest not found".to_string());

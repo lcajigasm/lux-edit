@@ -1,8 +1,8 @@
 // Imports updated
-use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rgba, Sense, Stroke, Vec2};
 use crate::editor::{DiffHunk, DiffKind, Editor};
 use crate::syntax::{StyledToken, SyntaxHighlighter};
 use arboard::Clipboard;
+use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rgba, Sense, Stroke, Vec2};
 use std::process::Command;
 
 const MINIMAP_SPACING: f32 = 8.0;
@@ -170,7 +170,7 @@ pub fn show(
     let mut changed = false;
     let metrics = EditorMetrics::compute(ui, editor.line_count(), theme, font_settings);
     let available = ui.available_rect_before_wrap();
-    
+
     // Calculate minimap layout
     let mut minimap_rect =
         if editor.minimap_enabled && available.width() > MIN_EDITOR_WIDTH_FOR_MINIMAP {
@@ -182,7 +182,7 @@ pub fn show(
         } else {
             None
         };
-        
+
     let mut editor_rect = if let Some(mini) = minimap_rect {
         Rect::from_min_max(
             available.min,
@@ -191,12 +191,12 @@ pub fn show(
     } else {
         available
     };
-    
+
     if editor_rect.width() < 200.0 {
         minimap_rect = None;
         editor_rect = available;
     }
-    
+
     let visible_lines_count = (editor_rect.height() / metrics.line_height).ceil() as usize;
     let visible_lines_count = visible_lines_count.max(1);
 
@@ -221,8 +221,8 @@ pub fn show(
         ui.painter()
             .rect_filled(rect, 0.0, apply_minimap_opacity(theme.minimap_bg, opacity));
         ui.painter().line_segment(
-             [rect.left_top(), rect.left_bottom()],
-             Stroke::new(1.0, apply_minimap_opacity(theme.minimap_border, opacity))
+            [rect.left_top(), rect.left_bottom()],
+            Stroke::new(1.0, apply_minimap_opacity(theme.minimap_border, opacity)),
         );
     }
 
@@ -249,7 +249,7 @@ pub fn show(
         if let Some(pos) = response.interact_pointer_pos() {
             let (line, col, vis_line) =
                 screen_to_editor_pos(pos, &editor_rect, &metrics, editor, &visible_lines);
-            
+
             // Check gutter click for folding
             if pos.x <= editor_rect.left() + metrics.gutter_width {
                 if let Some(end_line) = fold_map.get(&line) {
@@ -265,7 +265,7 @@ pub fn show(
                     return changed; // Return early after fold toggle
                 }
             }
-            
+
             let ctrl = ui.input(|i| i.modifiers.command);
             if ctrl {
                 editor.add_cursor_at(line, col);
@@ -361,25 +361,25 @@ pub fn show(
         let line_count = editor.line_count().max(1);
         let total_minimap_height = line_count as f32 * MINIMAP_LINE_HEIGHT;
         let available_minimap_height = rect.height();
-        
+
         // Calculate minimap scroll offset
         // We want the viewport to be roughly centered or follow the editor scroll.
         // Simple approach: Proportional scrolling if content fits, specialized if not.
         // Actually, VS Code style: The minimap shows the whole file if it fits. If not, it behaves like a scrollbar.
         // But for a true minimap, we usually render 1:1 with fixed pixel steps and scroll it.
-        
+
         let mut minimap_scroll_y = 0.0;
-        
+
         if total_minimap_height > available_minimap_height {
             // Scrollable minimap
             // We want the "viewport" (current view) to be visible.
             // Current top line in editor
             let current_top_line = (editor.scroll_y / metrics.line_height).floor() as f32;
-            
+
             // Try to keep the viewport centered
             let target_center = current_top_line * MINIMAP_LINE_HEIGHT;
             minimap_scroll_y = target_center - (available_minimap_height / 2.0);
-            
+
             // Clamp
             let max_mini_scroll = total_minimap_height - available_minimap_height;
             minimap_scroll_y = minimap_scroll_y.clamp(0.0, max_mini_scroll);
@@ -406,50 +406,52 @@ pub fn show(
                 // Determine line under mouse (taking minimap scroll into account)
                 let rel_y = pos.y - rect.top() + minimap_scroll_y;
                 let line_idx = (rel_y / MINIMAP_LINE_HEIGHT).floor() as usize;
-                
+
                 if line_idx < line_count {
-                   let start = line_idx.saturating_sub(2);
-                   let end = (line_idx + 3).min(line_count);
-                   let mut preview = String::new();
-                   for line in start..end {
-                       let line_text = editor.line_text(line);
-                       preview.push_str(&format!("{:>4}  {}\n", line + 1, line_text));
-                   }
-                   
-                   if !preview.is_empty() {
-                       let layer_id = egui::LayerId::new(
-                           egui::Order::Foreground,
-                           egui::Id::new("minimap_preview_layer"),
-                       );
-                       egui::show_tooltip_at_pointer(
-                           ui.ctx(),
-                           layer_id,
-                           egui::Id::new("minimap_preview"),
-                           |ui: &mut egui::Ui| {
-                               ui.label(egui::RichText::new(preview).monospace().size(11.0));
-                           },
-                       );
-                   }
+                    let start = line_idx.saturating_sub(2);
+                    let end = (line_idx + 3).min(line_count);
+                    let mut preview = String::new();
+                    for line in start..end {
+                        let line_text = editor.line_text(line);
+                        preview.push_str(&format!("{:>4}  {}\n", line + 1, line_text));
+                    }
+
+                    if !preview.is_empty() {
+                        let layer_id = egui::LayerId::new(
+                            egui::Order::Foreground,
+                            egui::Id::new("minimap_preview_layer"),
+                        );
+                        egui::show_tooltip_at_pointer(
+                            ui.ctx(),
+                            layer_id,
+                            egui::Id::new("minimap_preview"),
+                            |ui: &mut egui::Ui| {
+                                ui.label(egui::RichText::new(preview).monospace().size(11.0));
+                            },
+                        );
+                    }
                 }
             }
         }
-        
+
         if (resp.clicked() || resp.dragged()) && resp.contains_pointer() {
             if let Some(pos) = resp.interact_pointer_pos() {
-               // Calculate targeted line
-               let rel_y = pos.y - rect.top() + minimap_scroll_y;
-               let target_line = (rel_y / MINIMAP_LINE_HEIGHT).floor() as usize;
-               
-               // We simply jump to that line
-               // Center that line in the editor if possible
-               let target_line = target_line.min(line_count.saturating_sub(1));
-               
-               let target_editor_y = target_line as f32 * metrics.line_height;
-               // Center: target_y - (half screen)
-               let centered_y = target_editor_y - (editor_rect.height() / 2.0);
-               
-               let max_scroll = (visible_lines.len() as f32 * metrics.line_height - editor_rect.height()).max(0.0);
-               editor.scroll_y = centered_y.clamp(0.0, max_scroll);
+                // Calculate targeted line
+                let rel_y = pos.y - rect.top() + minimap_scroll_y;
+                let target_line = (rel_y / MINIMAP_LINE_HEIGHT).floor() as usize;
+
+                // We simply jump to that line
+                // Center that line in the editor if possible
+                let target_line = target_line.min(line_count.saturating_sub(1));
+
+                let target_editor_y = target_line as f32 * metrics.line_height;
+                // Center: target_y - (half screen)
+                let centered_y = target_editor_y - (editor_rect.height() / 2.0);
+
+                let max_scroll = (visible_lines.len() as f32 * metrics.line_height
+                    - editor_rect.height())
+                .max(0.0);
+                editor.scroll_y = centered_y.clamp(0.0, max_scroll);
             }
         }
     }
@@ -494,7 +496,7 @@ impl EditorMetrics {
         let digits = line_count.to_string().len().max(3);
         let gutter_padding = theme.gutter_padding;
         let gutter_width = (digits as f32 * char_width) + gutter_padding * 2.0;
-        
+
         Self {
             font_id,
             line_height,
@@ -512,8 +514,8 @@ fn screen_to_editor_pos(
     visible_lines: &[usize],
 ) -> (usize, usize, usize) {
     let rel_y = pos.y - rect.top() + editor.scroll_y;
-    let vis_line_idx = (rel_y / metrics.line_height).floor() as usize; 
-    
+    let vis_line_idx = (rel_y / metrics.line_height).floor() as usize;
+
     let line_idx = if !visible_lines.is_empty() {
         if vis_line_idx < visible_lines.len() {
             visible_lines[vis_line_idx]
@@ -523,13 +525,13 @@ fn screen_to_editor_pos(
     } else {
         0
     };
-    
+
     let rel_x = pos.x - (rect.left() + metrics.gutter_width + 4.0) + editor.scroll_x;
     let col = (rel_x / metrics.char_width).round().max(0.0) as usize;
-    
+
     let line_len = editor.line_text(line_idx).chars().count();
     let col = col.min(line_len);
-    
+
     (line_idx, col, vis_line_idx)
 }
 
@@ -542,7 +544,7 @@ fn handle_keyboard(
 ) -> bool {
     let mut changed = false;
     let events = ui.input(|i| i.events.clone());
-    
+
     for event in events {
         match event {
             egui::Event::Text(text) => {
@@ -573,154 +575,162 @@ fn handle_keyboard(
                     changed = true;
                 }
             }
-            egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                match key {
-                    egui::Key::Enter => {
+            egui::Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } => match key {
+                egui::Key::Enter => {
+                    if editor.completion_visible {
+                        editor.apply_completion(0);
+                        changed = true;
+                    } else {
+                        editor.insert_newline();
+                        changed = true;
+                    }
+                }
+                egui::Key::D if modifiers.command => {
+                    editor.select_next_occurrence();
+                }
+                egui::Key::C if modifiers.command && modifiers.alt && modifiers.shift => {
+                    editor.add_column_cursors_from_selection();
+                }
+                egui::Key::R if modifiers.command && modifiers.alt => {
+                    editor.toggle_macro_recording();
+                }
+                egui::Key::P if modifiers.command && modifiers.alt => {
+                    editor.play_last_macro();
+                    changed = true;
+                }
+                egui::Key::L if modifiers.command && modifiers.shift => {
+                    editor.select_all_occurrences();
+                }
+                egui::Key::ArrowUp if modifiers.command && modifiers.alt => {
+                    editor.add_cursors_vertical(-1);
+                }
+                egui::Key::ArrowDown if modifiers.command && modifiers.alt => {
+                    editor.add_cursors_vertical(1);
+                }
+                egui::Key::Z if modifiers.command => {
+                    if modifiers.shift {
+                        editor.redo();
+                    } else {
+                        editor.undo();
+                    }
+                }
+                egui::Key::Y if modifiers.command => {
+                    editor.redo();
+                }
+                egui::Key::A if modifiers.command => {
+                    editor.select_all();
+                }
+                egui::Key::C if modifiers.command => {
+                    let text = editor.copy_text();
+                    if let Some(cb) = clipboard.as_mut() {
+                        let _ = cb.set_text(&text);
+                    }
+                }
+                egui::Key::X if modifiers.command => {
+                    let text = editor.cut_text();
+                    if let Some(cb) = clipboard.as_mut() {
+                        let _ = cb.set_text(&text);
+                    }
+                    changed = true;
+                }
+                egui::Key::V if modifiers.command => {
+                    let mut paste = None;
+                    if let Some(cb) = clipboard.as_mut() {
+                        if let Ok(text) = cb.get_text() {
+                            paste = Some(text);
+                        }
+                    }
+                    if let Some(text) = paste {
+                        editor.insert_text(&text);
+                        changed = true;
+                    }
+                }
+                egui::Key::Backspace => {
+                    if modifiers.alt || modifiers.mac_cmd {
+                        editor.delete_word_backward();
+                    } else {
+                        editor.backspace();
+                    }
+                    changed = true;
+                }
+                egui::Key::Delete => {
+                    if modifiers.alt {
+                        editor.delete_word_forward();
+                    } else {
+                        editor.delete_forward();
+                    }
+                    changed = true;
+                }
+                egui::Key::ArrowLeft => {
+                    if modifiers.alt {
+                        editor.move_word_left(modifiers.shift);
+                    } else if modifiers.mac_cmd {
+                        editor.move_to_start(modifiers.shift);
+                    } else {
+                        editor.move_left(modifiers.shift);
+                    }
+                }
+                egui::Key::ArrowRight => {
+                    if modifiers.alt {
+                        editor.move_word_right(modifiers.shift);
+                    } else if modifiers.mac_cmd {
+                        editor.move_to_end(modifiers.shift);
+                    } else {
+                        editor.move_right(modifiers.shift);
+                    }
+                }
+                egui::Key::ArrowUp => editor.move_up(modifiers.shift),
+                egui::Key::ArrowDown => editor.move_down(modifiers.shift),
+                egui::Key::PageUp => editor.move_page_up(modifiers.shift, visible_lines_count),
+                egui::Key::PageDown => editor.move_page_down(modifiers.shift, visible_lines_count),
+                egui::Key::Home => editor.move_home(modifiers.shift),
+                egui::Key::End => editor.move_end(modifiers.shift),
+                egui::Key::Tab => {
+                    if !modifiers.shift {
                         if editor.completion_visible {
                             editor.apply_completion(0);
-                            changed = true;
                         } else {
-                            editor.insert_newline();
-                            changed = true;
-                        }
-                    }
-                    egui::Key::D if modifiers.command => {
-                        editor.select_next_occurrence();
-                    }
-                    egui::Key::C if modifiers.command && modifiers.alt && modifiers.shift => {
-                        editor.add_column_cursors_from_selection();
-                    }
-                    egui::Key::R if modifiers.command && modifiers.alt => {
-                        editor.toggle_macro_recording();
-                    }
-                    egui::Key::P if modifiers.command && modifiers.alt => {
-                        editor.play_last_macro();
-                        changed = true;
-                    }
-                    egui::Key::L if modifiers.command && modifiers.shift => {
-                        editor.select_all_occurrences();
-                    }
-                    egui::Key::ArrowUp if modifiers.command && modifiers.alt => {
-                        editor.add_cursors_vertical(-1);
-                    }
-                    egui::Key::ArrowDown if modifiers.command && modifiers.alt => {
-                        editor.add_cursors_vertical(1);
-                    }
-                    egui::Key::Z if modifiers.command => {
-                        if modifiers.shift {
-                            editor.redo();
-                        } else {
-                            editor.undo();
-                        }
-                    }
-                    egui::Key::Y if modifiers.command => {
-                        editor.redo();
-                    }
-                    egui::Key::A if modifiers.command => {
-                        editor.select_all();
-                    }
-                    egui::Key::C if modifiers.command => {
-                        let text = editor.copy_text();
-                        if let Some(cb) = clipboard.as_mut() {
-                            let _ = cb.set_text(&text);
-                        }
-                    }
-                    egui::Key::X if modifiers.command => {
-                        let text = editor.cut_text();
-                        if let Some(cb) = clipboard.as_mut() {
-                            let _ = cb.set_text(&text);
+                            editor.insert_tab();
                         }
                         changed = true;
                     }
-                    egui::Key::V if modifiers.command => {
-                        let mut paste = None;
-                        if let Some(cb) = clipboard.as_mut() {
-                            if let Ok(text) = cb.get_text() {
-                                paste = Some(text);
-                            }
-                        }
-                        if let Some(text) = paste {
-                            editor.insert_text(&text);
-                            changed = true;
-                        }
-                    }
-                    egui::Key::Backspace => {
-                        if modifiers.alt || modifiers.mac_cmd {
-                             editor.delete_word_backward();
-                        } else {
-                             editor.backspace();
-                        }
-                        changed = true;
-                    }
-                    egui::Key::Delete => {
-                         if modifiers.alt {
-                             editor.delete_word_forward();
-                         } else {
-                             editor.delete_forward();
-                         }
-                        changed = true;
-                    }
-                    egui::Key::ArrowLeft => {
-                        if modifiers.alt {
-                            editor.move_word_left(modifiers.shift);
-                        } else if modifiers.mac_cmd {
-                             editor.move_to_start(modifiers.shift);
-                        } else {
-                            editor.move_left(modifiers.shift);
-                        }
-                    }
-                    egui::Key::ArrowRight => {
-                        if modifiers.alt {
-                             editor.move_word_right(modifiers.shift);
-                         } else if modifiers.mac_cmd {
-                              editor.move_to_end(modifiers.shift);
-                         } else {
-                             editor.move_right(modifiers.shift);
-                         }
-                    }
-                    egui::Key::ArrowUp => editor.move_up(modifiers.shift),
-                    egui::Key::ArrowDown => editor.move_down(modifiers.shift),
-                    egui::Key::PageUp => editor.move_page_up(modifiers.shift, visible_lines_count),
-                    egui::Key::PageDown => editor.move_page_down(modifiers.shift, visible_lines_count),
-                    egui::Key::Home => editor.move_home(modifiers.shift),
-                    egui::Key::End => editor.move_end(modifiers.shift),
-                    egui::Key::Tab => {
-                        if !modifiers.shift {
-                             if editor.completion_visible {
-                                editor.apply_completion(0);
-                             } else {
-                                editor.insert_tab();
-                             }
-                             changed = true;
-                        }
-                    }
-                    egui::Key::Space if modifiers.command => {
-                        editor.request_completion = true;
-                    }
-                    egui::Key::F if modifiers.command && modifiers.shift => {
-                        editor.request_formatting = true;
-                    }
-                    egui::Key::Escape => {
-                        editor.completion_visible = false;
-                    }
-                    egui::Key::F12 => {
-                        if modifiers.shift {
-                            editor.request_references = true;
-                        } else if modifiers.alt {
-                            editor.request_implementations = true;
-                        } else {
-                            editor.request_definition = true;
-                        }
-                    }
-                    _ => {}
                 }
-            }
+                egui::Key::Space if modifiers.command => {
+                    editor.request_completion = true;
+                }
+                egui::Key::F if modifiers.command && modifiers.shift => {
+                    editor.request_formatting = true;
+                }
+                egui::Key::Escape => {
+                    editor.completion_visible = false;
+                }
+                egui::Key::F12 => {
+                    if modifiers.shift {
+                        editor.request_references = true;
+                    } else if modifiers.alt {
+                        editor.request_implementations = true;
+                    } else {
+                        editor.request_definition = true;
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
-    let errors = editor.diagnostics.iter().filter(|d| d.severity <= 2).count();
-    editor.notification_badges =
-        errors + if editor.completion_visible { 1 } else { 0 } + if editor.macro_recording { 1 } else { 0 };
+    let errors = editor
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity <= 2)
+        .count();
+    editor.notification_badges = errors
+        + if editor.completion_visible { 1 } else { 0 }
+        + if editor.macro_recording { 1 } else { 0 };
     changed
 }
 
@@ -734,7 +744,7 @@ fn build_visible_lines(
 ) -> (Vec<usize>, std::collections::HashMap<usize, usize>) {
     let mut visible = Vec::with_capacity(total_lines);
     let mut line_to_vis = std::collections::HashMap::new();
-    
+
     let mut i = 0;
     while i < total_lines {
         // Skip collapsed ranges - simple check
@@ -745,7 +755,7 @@ fn build_visible_lines(
                 break;
             }
         }
-        
+
         if jump > 0 {
             line_to_vis.insert(i, visible.len());
             visible.push(i);
@@ -765,9 +775,9 @@ fn cursor_visual_y(
     line_height: f32,
 ) -> f32 {
     if let Some(vis) = line_to_visible.get(&pos.line) {
-         *vis as f32 * line_height
+        *vis as f32 * line_height
     } else {
-         pos.line as f32 * line_height 
+        pos.line as f32 * line_height
     }
 }
 
@@ -857,66 +867,68 @@ fn render_minimap_fixed(
 ) {
     let painter = ui.painter_at(rect);
     ui.set_clip_rect(rect); // Ensure we don't draw outside bounds
-    
+
     let opacity = editor.minimap_opacity.clamp(0.2, 1.0);
     let line_count = tokens.len();
-    
+
     // Calculate which lines are visible in the minimap rect
     let start_line = (minimap_scroll_y / MINIMAP_LINE_HEIGHT).floor() as usize;
     let visible_count = (rect.height() / MINIMAP_LINE_HEIGHT).ceil() as usize + 1;
     let end_line = (start_line + visible_count).min(line_count);
-    
+
     // Draw Text tokens
     for line_idx in start_line..end_line {
         if let Some(token_line) = tokens.get(line_idx) {
-             let y = rect.top() + (line_idx as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
-             let mut current_col = 0;
-             
-             for token in token_line {
-                 let text_len = token.text.chars().count();
-                 if text_len == 0 { continue; }
-                 
-                 let width = text_len as f32 * MINIMAP_CHAR_WIDTH;
-                 let x = rect.left() + (current_col as f32 * MINIMAP_CHAR_WIDTH);
-                 
-                 if x + width > rect.right() {
-                     // Clip if too wide
-                     break; 
-                 }
-                 
-                 // Simple rect for "text"
-                 let color = tint_for_minimap(token.color, theme, opacity);
-                 painter.rect_filled(
-                     Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, MINIMAP_CHAR_HEIGHT)),
-                     0.0,
-                     color
-                 );
-                 
-                 current_col += text_len;
-             }
+            let y = rect.top() + (line_idx as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
+            let mut current_col = 0;
+
+            for token in token_line {
+                let text_len = token.text.chars().count();
+                if text_len == 0 {
+                    continue;
+                }
+
+                let width = text_len as f32 * MINIMAP_CHAR_WIDTH;
+                let x = rect.left() + (current_col as f32 * MINIMAP_CHAR_WIDTH);
+
+                if x + width > rect.right() {
+                    // Clip if too wide
+                    break;
+                }
+
+                // Simple rect for "text"
+                let color = tint_for_minimap(token.color, theme, opacity);
+                painter.rect_filled(
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, MINIMAP_CHAR_HEIGHT)),
+                    0.0,
+                    color,
+                );
+
+                current_col += text_len;
+            }
         }
     }
-    
+
     // Draw Viewport Overlay
     {
         // Viewport represents the editor's current view
         let viewport_start_line = editor.scroll_y / editor_line_height;
         let viewport_end_line = (editor.scroll_y + editor_height) / editor_line_height;
-        
+
         let vp_y1 = rect.top() + (viewport_start_line * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
         let vp_y2 = rect.top() + (viewport_end_line * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
-        
+
         // Clamp to rect
         // We allow it to be slightly off if scrolling
         let vp_rect = Rect::from_min_max(
             Pos2::new(rect.left(), vp_y1),
-            Pos2::new(rect.right(), vp_y2)
+            Pos2::new(rect.right(), vp_y2),
         );
-        
+
         // Only draw if overlapping
         if vp_rect.intersects(rect) {
             let visible_vp = vp_rect.intersect(rect);
-             painter.rect_filled(
+            painter.rect_filled(
                 visible_vp,
                 0.0,
                 apply_minimap_opacity(theme.minimap_viewport, opacity),
@@ -928,38 +940,40 @@ fn render_minimap_fixed(
             );
         }
     }
-    
+
     // Draw Diff Hunks (Simplified)
     for hunk in diff_hunks {
         // ... (reuse similar logic but adapted for fixed co-ords) ...
         let start_y = rect.top() + (hunk.start as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
         let end_y = rect.top() + (hunk.end as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
-        
-        if start_y > rect.bottom() || end_y < rect.top() { continue; }
-        
+
+        if start_y > rect.bottom() || end_y < rect.top() {
+            continue;
+        }
+
         let color = match hunk.kind {
             DiffKind::Added => Color32::from_rgb(75, 185, 116),
             DiffKind::Removed => Color32::from_rgb(214, 90, 90),
             DiffKind::Modified => Color32::from_rgb(220, 170, 80),
         };
-        
+
         let marker_rect = Rect::from_min_max(
-             Pos2::new(rect.right() - 3.0, start_y.max(rect.top())),
-             Pos2::new(rect.right(), end_y.min(rect.bottom()))
+            Pos2::new(rect.right() - 3.0, start_y.max(rect.top())),
+            Pos2::new(rect.right(), end_y.min(rect.bottom())),
         );
-        
+
         painter.rect_filled(marker_rect, 0.0, apply_minimap_opacity(color, opacity));
     }
-    
+
     // Draw Search Matches
-     if let Some(query) = search_query {
+    if let Some(query) = search_query {
         if !query.is_empty() {
             // This is expensive to re-scan, ideally passed in, but for now we iterate visible range
-             for line_idx in start_line..end_line {
+            for line_idx in start_line..end_line {
                 let line_text = editor.line_text(line_idx);
                 if line_text.contains(query) {
-                     let y = rect.top() + (line_idx as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
-                     let marker = Rect::from_min_size(
+                    let y = rect.top() + (line_idx as f32 * MINIMAP_LINE_HEIGHT) - minimap_scroll_y;
+                    let marker = Rect::from_min_size(
                         Pos2::new(rect.left(), y),
                         Vec2::new(rect.width(), MINIMAP_LINE_HEIGHT),
                     );
@@ -969,7 +983,7 @@ fn render_minimap_fixed(
                         apply_minimap_opacity(theme.search_match, opacity * 0.8),
                     );
                 }
-             }
+            }
         }
     }
 }
@@ -1159,15 +1173,7 @@ fn render_lines(
                 }
             }
 
-            draw_inline_blame(
-                &painter,
-                rect,
-                line_idx,
-                offset_x,
-                y,
-                metrics,
-                editor,
-            );
+            draw_inline_blame(&painter, rect, line_idx, offset_x, y, metrics, editor);
         } else {
             let text = editor.line_text(line_idx);
             if !text.is_empty() {
@@ -1185,15 +1191,7 @@ fn render_lines(
                 );
             }
             let text_end_x = text_x_base + text.chars().count() as f32 * metrics.char_width;
-            draw_inline_blame(
-                &painter,
-                rect,
-                line_idx,
-                text_end_x,
-                y,
-                metrics,
-                editor,
-            );
+            draw_inline_blame(&painter, rect, line_idx, text_end_x, y, metrics, editor);
         }
 
         if cursor_visible {
@@ -1329,7 +1327,10 @@ fn draw_indent_guides(
             continue;
         }
         painter.line_segment(
-            [Pos2::new(x, y + 2.0), Pos2::new(x, y + metrics.line_height - 2.0)],
+            [
+                Pos2::new(x, y + 2.0),
+                Pos2::new(x, y + metrics.line_height - 2.0),
+            ],
             Stroke::new(1.0, theme.gutter_divider.gamma_multiply(0.45)),
         );
     }
@@ -1385,18 +1386,24 @@ fn draw_completion_popup(
     metrics: &EditorMetrics,
     editor: &Editor,
 ) {
-    if !editor.completion_visible || editor.completion_items.is_empty() || editor.cursors.is_empty() {
+    if !editor.completion_visible || editor.completion_items.is_empty() || editor.cursors.is_empty()
+    {
         return;
     }
     let cursor = &editor.cursors[0];
-    let popup_x = rect.left() + metrics.gutter_width + 4.0 + cursor.pos.col as f32 * metrics.char_width
-        - editor.scroll_x;
-    let popup_y = rect.top() + cursor.pos.line as f32 * metrics.line_height - editor.scroll_y + metrics.line_height;
+    let popup_x =
+        rect.left() + metrics.gutter_width + 4.0 + cursor.pos.col as f32 * metrics.char_width
+            - editor.scroll_x;
+    let popup_y = rect.top() + cursor.pos.line as f32 * metrics.line_height - editor.scroll_y
+        + metrics.line_height;
     let width = 320.0_f32.min(rect.width() - 20.0);
     let rows = editor.completion_items.len().min(6);
     let height = rows as f32 * 18.0 + 8.0;
     let popup_rect = Rect::from_min_size(
-        Pos2::new(popup_x.min(rect.right() - width - 4.0), popup_y.min(rect.bottom() - height - 4.0)),
+        Pos2::new(
+            popup_x.min(rect.right() - width - 4.0),
+            popup_y.min(rect.bottom() - height - 4.0),
+        ),
         Vec2::new(width, height),
     );
     painter.rect_filled(popup_rect, 4.0, Color32::from_black_alpha(220));
@@ -1411,11 +1418,14 @@ fn draw_completion_popup(
             egui::Align2::LEFT_TOP,
             text,
             FontId::monospace(10.5),
-            if idx == 0 { Color32::WHITE } else { Color32::from_gray(190) },
+            if idx == 0 {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(190)
+            },
         );
     }
 }
-
 
 fn draw_selection(
     painter: &egui::Painter,

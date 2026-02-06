@@ -309,7 +309,8 @@ impl CommandPalette {
                                 Some((c.clone(), score))
                             })
                             .collect();
-                        filtered.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
+                        filtered
+                            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
                         let count = filtered.len();
 
                         // Keyboard navigation
@@ -426,14 +427,13 @@ fn category_matches(filter: &str, category: CommandCategory) -> bool {
     if filter.is_empty() {
         return true;
     }
-    if category
-        .label()
-        .to_lowercase()
-        .starts_with(&filter)
-    {
+    if category.label().to_lowercase().starts_with(&filter) {
         return true;
     }
-    category.aliases().iter().any(|alias| alias.starts_with(&filter))
+    category
+        .aliases()
+        .iter()
+        .any(|alias| alias.starts_with(&filter))
 }
 
 fn command_score(

@@ -1133,7 +1133,10 @@ impl Editor {
         let current = self.cursors.clone();
         for cursor in current {
             let line = if delta.is_negative() {
-                cursor.pos.line.saturating_sub(delta.wrapping_abs() as usize)
+                cursor
+                    .pos
+                    .line
+                    .saturating_sub(delta.wrapping_abs() as usize)
             } else {
                 (cursor.pos.line + delta as usize).min(max_line)
             };
@@ -1329,7 +1332,12 @@ impl Editor {
 
     pub fn organize_imports(&mut self) -> bool {
         let path = self.file_path.as_deref();
-        let mut lines: Vec<String> = self.rope.to_string().lines().map(|s| s.to_string()).collect();
+        let mut lines: Vec<String> = self
+            .rope
+            .to_string()
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
         if lines.is_empty() {
             return false;
         }
@@ -1341,7 +1349,9 @@ impl Editor {
                     "rs" => t.starts_with("use "),
                     "py" => t.starts_with("import ") || t.starts_with("from "),
                     "js" | "jsx" | "ts" | "tsx" => t.starts_with("import "),
-                    _ => t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from "),
+                    _ => {
+                        t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from ")
+                    }
                 }
             } else {
                 t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from ")
@@ -1385,7 +1395,9 @@ impl Editor {
         }
         for diag in &self.diagnostics {
             let msg = diag.message.to_lowercase();
-            if msg.contains("cannot find") || msg.contains("undeclared") || msg.contains("not found")
+            if msg.contains("cannot find")
+                || msg.contains("undeclared")
+                || msg.contains("not found")
             {
                 if let Some(symbol) = extract_backticked_symbol(&diag.message) {
                     actions.push(format!("Auto Import: {}", symbol));
@@ -1559,9 +1571,7 @@ impl Editor {
         let start_ci = pos_to_char_idx(&self.rope, &start_pos);
         let full = self.rope.to_string();
 
-        let found = full[..start_ci]
-            .rfind(query)
-            .or_else(|| full.rfind(query)); // Wrap around
+        let found = full[..start_ci].rfind(query).or_else(|| full.rfind(query)); // Wrap around
 
         if let Some(match_start) = found {
             let match_end = match_start + query.len();
@@ -1655,8 +1665,7 @@ fn replace_whole_word(input: &str, from: &str, to: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut i = 0usize;
     while i < chars.len() {
-        let can_match = i + needle.len() <= chars.len()
-            && chars[i..i + needle.len()] == needle[..];
+        let can_match = i + needle.len() <= chars.len() && chars[i..i + needle.len()] == needle[..];
         if can_match {
             let prev_ok = i == 0 || !is_word_char(chars[i - 1]);
             let next_ok = i + needle.len() >= chars.len() || !is_word_char(chars[i + needle.len()]);

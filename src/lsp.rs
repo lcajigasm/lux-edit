@@ -244,7 +244,8 @@ pub fn collect_snapshot(
                             .and_then(|s| s.get("line"))
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as usize;
-                        let severity = diag.get("severity").and_then(|v| v.as_u64()).unwrap_or(3) as u8;
+                        let severity =
+                            diag.get("severity").and_then(|v| v.as_u64()).unwrap_or(3) as u8;
                         let message = diag
                             .get("message")
                             .and_then(|v| v.as_str())
@@ -341,7 +342,11 @@ fn completion_items_from_result(result: Option<&Value>) -> Option<Vec<Completion
     }?;
     let mut out = Vec::new();
     for item in items {
-        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let label = item
+            .get("label")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if label.is_empty() {
             continue;
         }
@@ -481,16 +486,36 @@ fn snippets_for(path: &Path) -> Vec<CompletionCandidate> {
         .to_ascii_lowercase();
     let raw: &[(&str, &str, &str)] = match ext.as_str() {
         "rs" => &[
-            ("fn", "fn ${1:name}(${2:args}) {\n    ${3}\n}", "Rust snippet"),
+            (
+                "fn",
+                "fn ${1:name}(${2:args}) {\n    ${3}\n}",
+                "Rust snippet",
+            ),
             ("impl", "impl ${1:Type} {\n    ${2}\n}", "Rust snippet"),
-            ("test", "#[test]\nfn ${1:name}() {\n    ${2}\n}", "Rust snippet"),
+            (
+                "test",
+                "#[test]\nfn ${1:name}() {\n    ${2}\n}",
+                "Rust snippet",
+            ),
         ],
         "py" => &[
-            ("def", "def ${1:name}(${2:args}):\n    ${3:pass}", "Python snippet"),
-            ("class", "class ${1:Name}:\n    def __init__(self):\n        ${2:pass}", "Python snippet"),
+            (
+                "def",
+                "def ${1:name}(${2:args}):\n    ${3:pass}",
+                "Python snippet",
+            ),
+            (
+                "class",
+                "class ${1:Name}:\n    def __init__(self):\n        ${2:pass}",
+                "Python snippet",
+            ),
         ],
         "js" | "jsx" | "ts" | "tsx" => &[
-            ("func", "function ${1:name}(${2:args}) {\n  ${3}\n}", "JS/TS snippet"),
+            (
+                "func",
+                "function ${1:name}(${2:args}) {\n  ${3}\n}",
+                "JS/TS snippet",
+            ),
             ("clg", "console.log(${1:value});", "JS/TS snippet"),
         ],
         _ => &[],

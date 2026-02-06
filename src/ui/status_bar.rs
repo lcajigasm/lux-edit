@@ -30,15 +30,15 @@ pub fn show(
     );
 
     ui.painter().rect_filled(bar_rect, 0.0, BAR_BG);
-    
+
     // Allocate the area
     let mut ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(bar_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     ui.spacing_mut().item_spacing = egui::Vec2::new(0.0, 0.0);
-    
+
     // Left Side (Git)
     if let Some(info) = git_info {
         let mut status = info.branch.clone();
@@ -51,10 +51,10 @@ pub fn show(
         if info.behind > 0 {
             status.push_str(&format!(" ↓{}", info.behind));
         }
-        
+
         status_item(&mut ui, &format!("\u{E0A0} {}", status)); //  branch symbol (requires nerd font, fallback text)
-        // Note: \u{E0A0} is Nerd Font git branch. 
-        // If not available, we can use "git: "
+                                                               // Note: \u{E0A0} is Nerd Font git branch.
+                                                               // If not available, we can use "git: "
     }
     let mut added = 0usize;
     let mut modified = 0usize;
@@ -67,7 +67,10 @@ pub fn show(
             crate::editor::DiffKind::Removed => removed += span,
         }
     }
-    status_item(&mut ui, &format!("SCM +{} ~{} -{}", added, modified, removed));
+    status_item(
+        &mut ui,
+        &format!("SCM +{} ~{} -{}", added, modified, removed),
+    );
     let diag_errors = editor
         .diagnostics
         .iter()
@@ -85,14 +88,19 @@ pub fn show(
     status_item(&mut ui, &editor.lsp_status);
 
     // Spacer
-    ui.label(""); 
+    ui.label("");
 
     // Right Side
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // Cursor Position
         let primary = &editor.cursors[0];
         let cursor_text = if editor.cursors.len() > 1 {
-            format!("Ln {}, Col {} ({} cursors)", primary.pos.line + 1, primary.pos.col + 1, editor.cursors.len())
+            format!(
+                "Ln {}, Col {} ({} cursors)",
+                primary.pos.line + 1,
+                primary.pos.col + 1,
+                editor.cursors.len()
+            )
         } else {
             format!("Ln {}, Col {}", primary.pos.line + 1, primary.pos.col + 1)
         };
@@ -244,37 +252,37 @@ pub fn show(
             &lang_resp,
             egui::popup::PopupCloseBehavior::CloseOnClickOutside,
             |ui: &mut egui::Ui| {
-            ui.set_min_width(220.0);
-            if ui
-                .selectable_label(editor.syntax_override.is_none(), "Auto (Detect)")
-                .clicked()
-            {
-                editor.syntax_override = None;
-                ui.close_menu();
-            }
-            ui.separator();
-            let mut syntaxes = highlighter.available_syntaxes();
-            if !syntaxes
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case("Plain Text"))
-            {
-                syntaxes.insert(0, "Plain Text".into());
-            }
-            egui::ScrollArea::vertical()
-                .max_height(260.0)
-                .show(ui, |ui| {
-                    for name in syntaxes {
-                        let selected = editor
-                            .syntax_override
-                            .as_deref()
-                            .map(|v| v == name.as_str())
-                            .unwrap_or(false);
-                        if ui.selectable_label(selected, &name).clicked() {
-                            editor.syntax_override = Some(name.clone());
-                            ui.close_menu();
+                ui.set_min_width(220.0);
+                if ui
+                    .selectable_label(editor.syntax_override.is_none(), "Auto (Detect)")
+                    .clicked()
+                {
+                    editor.syntax_override = None;
+                    ui.close_menu();
+                }
+                ui.separator();
+                let mut syntaxes = highlighter.available_syntaxes();
+                if !syntaxes
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case("Plain Text"))
+                {
+                    syntaxes.insert(0, "Plain Text".into());
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for name in syntaxes {
+                            let selected = editor
+                                .syntax_override
+                                .as_deref()
+                                .map(|v| v == name.as_str())
+                                .unwrap_or(false);
+                            if ui.selectable_label(selected, &name).clicked() {
+                                editor.syntax_override = Some(name.clone());
+                                ui.close_menu();
+                            }
                         }
-                    }
-                });
+                    });
             },
         );
     });
@@ -283,23 +291,32 @@ pub fn show(
 fn status_item(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let font = egui::FontId::proportional(12.0);
     let text_color = BAR_TEXT;
-    
+
     // Calculate size
     let padding = egui::vec2(10.0, 0.0);
-    let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), text_color);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), font.clone(), text_color);
     let (rect, resp) = ui.allocate_exact_size(
         egui::Vec2::new(galley.rect.width() + padding.x * 2.0, BAR_HEIGHT),
-        egui::Sense::click()
+        egui::Sense::click(),
     );
-    
+
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_white_alpha(BAR_ITEM_HOVER_ALPHA));
+        ui.painter().rect_filled(
+            rect,
+            0.0,
+            egui::Color32::from_white_alpha(BAR_ITEM_HOVER_ALPHA),
+        );
     }
-    
+
     ui.painter().galley(
-        egui::Pos2::new(rect.left() + padding.x, rect.center().y - galley.rect.height() / 2.0), 
+        egui::Pos2::new(
+            rect.left() + padding.x,
+            rect.center().y - galley.rect.height() / 2.0,
+        ),
         galley,
-        text_color
+        text_color,
     );
 
     resp

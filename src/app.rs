@@ -30,6 +30,8 @@ const TAB_MAX_WIDTH: f32 = 220.0;
 const TAB_PADDING_X: f32 = 12.0;
 const TAB_CLOSE_SIZE: f32 = 14.0;
 const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 122, 204); // VS Code-ish blue active line
+const ACTIVITY_BAR_BG: egui::Color32 = egui::Color32::from_rgb(43, 43, 43);
+const SIDEBAR_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 38);
 
 // GitInfo moved to ui::status_bar
 
@@ -41,6 +43,7 @@ enum TabAction {
     ReopenClosed,
     TogglePin(usize, bool),
     Reorder(usize, usize),
+    MoveToSplit(usize, bool),
     NewTab,
 }
 
@@ -363,7 +366,8 @@ impl LuxApp {
                     .map(|(title, shortcut, id)| (title.as_str(), shortcut.as_str(), id.as_str())),
             );
         }
-        let (editors, active_tab) = load_session_editors().unwrap_or_else(|| (vec![Editor::new()], 0));
+        let (editors, active_tab) =
+            load_session_editors().unwrap_or_else(|| (vec![Editor::new()], 0));
         let mut app = Self {
             editors,
             active_tab,
@@ -486,7 +490,7 @@ impl LuxApp {
             split_secondary_tab: None,
             zen_mode: false,
             focus_mode: false,
-            show_dock_panel: true,
+            show_dock_panel: false,
             dock_tab: DockPanelTab::Terminal,
             dock_side: DockSide::Bottom,
             dock_size: 180.0,
@@ -545,7 +549,7 @@ impl LuxApp {
             workspace_root: workspace,
             registry_entries,
             marketplace_status: String::new(),
-            show_git_panel: true,
+            show_git_panel: false,
             git_panel: GitPanelState::default(),
             lsp_rx: None,
             lsp_last_request: 0.0,
@@ -586,9 +590,17 @@ impl LuxApp {
             if self.closed_tabs.len() > 50 {
                 self.closed_tabs.remove(0);
             }
+            if let Some(secondary_idx) = self.split_secondary_tab {
+                if secondary_idx == idx {
+                    self.split_secondary_tab = None;
+                } else if secondary_idx > idx {
+                    self.split_secondary_tab = Some(secondary_idx - 1);
+                }
+            }
             if self.active_tab >= self.editors.len() {
                 self.active_tab = self.editors.len() - 1;
             }
+            self.ensure_split_secondary();
         }
         self.confirm_close_tab = None;
     }
@@ -673,6 +685,48 @@ impl LuxApp {
         } else if from > self.active_tab && to <= self.active_tab {
             self.active_tab += 1;
         }
+        if let Some(secondary_idx) = self.split_secondary_tab {
+            self.split_secondary_tab = Some(remap_tab_index_after_move(secondary_idx, from, to));
+        }
+    }
+
+    fn move_tab_to_split(&mut self, idx: usize, to_secondary: bool) {
+        if idx >= self.editors.len() {
+            return;
+        }
+        if to_secondary && self.split_mode == SplitMode::None {
+            self.split_mode = SplitMode::Vertical;
+        }
+        if self.split_mode == SplitMode::None {
+            return;
+        }
+        if to_secondary {
+            if idx == self.active_tab {
+                if let Some(previous_secondary) = self.split_secondary_tab {
+                    if previous_secondary != idx {
+                        self.active_tab = previous_secondary;
+                    }
+                } else if let Some(primary_candidate) =
+                    (0..self.editors.len()).find(|candidate| *candidate != idx)
+                {
+                    self.active_tab = primary_candidate;
+                }
+            }
+            self.split_secondary_tab = Some(idx);
+        } else {
+            if self.split_secondary_tab == Some(idx) {
+                let previous_primary = self.active_tab;
+                self.active_tab = idx;
+                if previous_primary != idx {
+                    self.split_secondary_tab = Some(previous_primary);
+                } else {
+                    self.split_secondary_tab = None;
+                }
+            } else {
+                self.active_tab = idx;
+            }
+        }
+        self.ensure_split_secondary();
     }
 
     fn update_git_info(&mut self, ctx: &egui::Context) {
@@ -699,9 +753,8 @@ impl LuxApp {
     }
 
     fn active_workspace_key(&self) -> PathBuf {
-        self.active_repo_dir().unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        })
+        self.active_repo_dir()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     fn active_language_label(&self) -> String {
@@ -724,7 +777,11 @@ impl LuxApp {
                 family: FontFamilyKind::Monospace,
                 ligatures: false,
             });
-        if let Some(path) = self.editors.get(self.active_tab).and_then(|e| e.file_path.as_ref()) {
+        if let Some(path) = self
+            .editors
+            .get(self.active_tab)
+            .and_then(|e| e.file_path.as_ref())
+        {
             for (folder, override_font) in &self.folder_font_overrides {
                 if path.starts_with(folder) {
                     base = override_font.clone();
@@ -856,60 +913,67 @@ impl LuxApp {
 
                 ui.separator();
                 ui.label("Changed files");
-                egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
-                    for file in self.git_panel.files.clone() {
-                        ui.horizontal(|ui| {
-                            let selected = self.git_panel.selected_file.as_deref()
-                                == Some(file.path.as_str());
-                            if ui
-                                .selectable_label(
-                                    selected,
-                                    format!(
-                                        "[{}{}] {}",
-                                        if file.staged { "S" } else { "U" },
-                                        file.status,
-                                        file.path
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                self.git_panel.selected_file = Some(file.path.clone());
-                                self.git_panel.diff_text = read_git_diff_for_file(&repo, &file.path);
-                            }
-                            if file.staged {
-                                if ui.small_button("Unstage").clicked() {
-                                    let _ = git_unstage_file(&repo, &file.path);
+                egui::ScrollArea::vertical()
+                    .max_height(170.0)
+                    .show(ui, |ui| {
+                        for file in self.git_panel.files.clone() {
+                            ui.horizontal(|ui| {
+                                let selected = self.git_panel.selected_file.as_deref()
+                                    == Some(file.path.as_str());
+                                if ui
+                                    .selectable_label(
+                                        selected,
+                                        format!(
+                                            "[{}{}] {}",
+                                            if file.staged { "S" } else { "U" },
+                                            file.status,
+                                            file.path
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.git_panel.selected_file = Some(file.path.clone());
+                                    self.git_panel.diff_text =
+                                        read_git_diff_for_file(&repo, &file.path);
+                                }
+                                if file.staged {
+                                    if ui.small_button("Unstage").clicked() {
+                                        let _ = git_unstage_file(&repo, &file.path);
+                                        self.git_panel.last_refresh = 0.0;
+                                    }
+                                } else if ui.small_button("Stage").clicked() {
+                                    let _ = git_stage_file(&repo, &file.path);
                                     self.git_panel.last_refresh = 0.0;
                                 }
-                            } else if ui.small_button("Stage").clicked() {
-                                let _ = git_stage_file(&repo, &file.path);
-                                self.git_panel.last_refresh = 0.0;
-                            }
-                        });
-                    }
-                });
+                            });
+                        }
+                    });
 
                 ui.separator();
                 ui.label("Diff");
-                egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(&self.git_panel.diff_text)
-                            .monospace()
-                            .size(11.0),
-                    );
-                });
-
-                ui.separator();
-                ui.label("Recent commits");
-                egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
-                    for commit in &self.git_panel.commits {
+                egui::ScrollArea::vertical()
+                    .max_height(210.0)
+                    .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new(format!("{} {}", commit.hash, commit.summary))
+                            egui::RichText::new(&self.git_panel.diff_text)
                                 .monospace()
                                 .size(11.0),
                         );
-                    }
-                });
+                    });
+
+                ui.separator();
+                ui.label("Recent commits");
+                egui::ScrollArea::vertical()
+                    .max_height(110.0)
+                    .show(ui, |ui| {
+                        for commit in &self.git_panel.commits {
+                            ui.label(
+                                egui::RichText::new(format!("{} {}", commit.hash, commit.summary))
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                        }
+                    });
 
                 ui.separator();
                 ui.label("Blame (active line)");
@@ -1062,7 +1126,12 @@ impl LuxApp {
                     if let Some(score) = symbol_score(&line_lower, &query) {
                         ranked.push((
                             score,
-                            format!("{}:{}: {}", full_path.to_string_lossy(), line_idx + 1, trimmed),
+                            format!(
+                                "{}:{}: {}",
+                                full_path.to_string_lossy(),
+                                line_idx + 1,
+                                trimmed
+                            ),
                         ));
                     }
                 }
@@ -1175,21 +1244,21 @@ impl LuxApp {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(size) = value.get("editor.fontSize").and_then(|v| v.as_f64()) {
                     let workspace = self.active_workspace_key();
-                    let entry = self.workspace_fonts.entry(workspace).or_insert(
-                        WorkspaceFontSettings {
-                            size: 13.5,
-                            family: FontFamilyKind::Monospace,
-                            ligatures: false,
-                        },
-                    );
+                    let entry =
+                        self.workspace_fonts
+                            .entry(workspace)
+                            .or_insert(WorkspaceFontSettings {
+                                size: 13.5,
+                                family: FontFamilyKind::Monospace,
+                                ligatures: false,
+                            });
                     entry.size = size as f32;
                 }
                 if let Some(tab) = value.get("editor.tabSize").and_then(|v| v.as_u64()) {
                     self.active_editor().indent_width = tab as usize;
                 }
-                if let Some(insert_spaces) = value
-                    .get("editor.insertSpaces")
-                    .and_then(|v| v.as_bool())
+                if let Some(insert_spaces) =
+                    value.get("editor.insertSpaces").and_then(|v| v.as_bool())
                 {
                     self.active_editor().indent_style = if insert_spaces {
                         crate::editor::IndentStyle::Spaces
@@ -1328,46 +1397,92 @@ impl LuxApp {
         };
     }
 
+    fn sidebar_tab_title(tab: SidebarTab) -> &'static str {
+        match tab {
+            SidebarTab::Explorer => "Explorer",
+            SidebarTab::Search => "Search",
+            SidebarTab::Git => "Source Control",
+            SidebarTab::Debug => "Run and Debug",
+            SidebarTab::Collab => "Collab",
+        }
+    }
+
+    fn sidebar_tab_hint(tab: SidebarTab) -> &'static str {
+        match tab {
+            SidebarTab::Explorer => "Ctrl+Alt+1",
+            SidebarTab::Search => "Ctrl+Alt+2",
+            SidebarTab::Git => "Ctrl+Alt+3",
+            SidebarTab::Debug => "Ctrl+Alt+4",
+            SidebarTab::Collab => "Ctrl+Alt+5",
+        }
+    }
+
+    fn show_activity_bar(&mut self, ui: &mut egui::Ui) {
+        egui::SidePanel::left("activity_bar")
+            .resizable(false)
+            .exact_width(48.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(ACTIVITY_BAR_BG)
+                    .inner_margin(egui::Margin::symmetric(4.0, 8.0)),
+            )
+            .show_inside(ui, |ui| {
+                let tabs = [
+                    (SidebarTab::Explorer, "E"),
+                    (SidebarTab::Search, "S"),
+                    (SidebarTab::Git, "G"),
+                    (SidebarTab::Debug, "D"),
+                    (SidebarTab::Collab, "C"),
+                ];
+                for (tab, icon) in tabs {
+                    let selected = self.show_sidebar && self.sidebar_tab == tab;
+                    let label = egui::RichText::new(icon).monospace().size(14.0).strong();
+                    let button = egui::SelectableLabel::new(selected, label);
+                    let response = ui.add_sized([36.0, 34.0], button).on_hover_text(format!(
+                        "{} ({})",
+                        Self::sidebar_tab_title(tab),
+                        Self::sidebar_tab_hint(tab)
+                    ));
+                    if response.clicked() {
+                        if self.show_sidebar && self.sidebar_tab == tab {
+                            self.show_sidebar = false;
+                        } else {
+                            self.show_sidebar = true;
+                            self.sidebar_tab = tab;
+                        }
+                    }
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                    if ui
+                        .add_sized([36.0, 30.0], egui::Button::new("..."))
+                        .on_hover_text("Manage")
+                        .clicked()
+                    {
+                        self.show_help_window = true;
+                    }
+                });
+            });
+    }
+
     fn show_left_sidebar(&mut self, ui: &mut egui::Ui) {
         if !self.show_sidebar {
             return;
         }
         egui::SidePanel::left("left_sidebar")
             .resizable(true)
-            .default_width(260.0)
+            .default_width(290.0)
+            .frame(
+                egui::Frame::none()
+                    .fill(SIDEBAR_BG)
+                    .inner_margin(egui::Margin::symmetric(8.0, 8.0)),
+            )
             .show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Explorer, "Explorer")
-                        .clicked()
-                    {
-                        self.sidebar_tab = SidebarTab::Explorer;
-                    }
-                    if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Search, "Search")
-                        .clicked()
-                    {
-                        self.sidebar_tab = SidebarTab::Search;
-                    }
-                    if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Git, "Git")
-                        .clicked()
-                    {
-                        self.sidebar_tab = SidebarTab::Git;
-                    }
-                    if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Debug, "Debug")
-                        .clicked()
-                    {
-                        self.sidebar_tab = SidebarTab::Debug;
-                    }
-                    if ui
-                        .selectable_label(self.sidebar_tab == SidebarTab::Collab, "Collab")
-                        .clicked()
-                    {
-                        self.sidebar_tab = SidebarTab::Collab;
-                    }
-                });
+                ui.label(
+                    egui::RichText::new(Self::sidebar_tab_title(self.sidebar_tab))
+                        .strong()
+                        .size(13.0)
+                        .color(egui::Color32::from_rgb(220, 220, 220)),
+                );
                 ui.separator();
 
                 match self.sidebar_tab {
@@ -1534,42 +1649,51 @@ impl LuxApp {
                             egui::TextEdit::singleline(&mut self.sidebar_symbol_query)
                                 .hint_text("Search symbols (document/workspace)"),
                         );
-                        if symbol_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if symbol_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
                             self.run_symbol_search();
                         }
                         if ui.button("Run Symbol Search").clicked() {
                             self.run_symbol_search();
                         }
-                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                            for symbol in self.sidebar_symbol_results.clone() {
-                                if ui.selectable_label(false, &symbol).clicked() {
-                                    if let Some((path, rest)) = symbol.split_once(':') {
-                                        self.open_path_in_tab(Path::new(path));
-                                        if let Some((line_str, _)) = rest.trim_start().split_once(':') {
-                                            if let Ok(line) = line_str.trim().parse::<usize>() {
-                                                self.active_editor().goto_line(line);
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for symbol in self.sidebar_symbol_results.clone() {
+                                    if ui.selectable_label(false, &symbol).clicked() {
+                                        if let Some((path, rest)) = symbol.split_once(':') {
+                                            self.open_path_in_tab(Path::new(path));
+                                            if let Some((line_str, _)) =
+                                                rest.trim_start().split_once(':')
+                                            {
+                                                if let Ok(line) = line_str.trim().parse::<usize>() {
+                                                    self.active_editor().goto_line(line);
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
-                        });
+                            });
                         ui.separator();
                         ui.label("LSP Navigation Results");
-                        egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
-                            for nav in self.editors[self.active_tab].lsp_nav_results.clone() {
-                                if ui.selectable_label(false, &nav).clicked() {
-                                    let cleaned = nav.trim_start_matches("file://");
-                                    let parts: Vec<&str> = cleaned.split(':').collect();
-                                    if parts.len() >= 3 {
-                                        let line = parts[parts.len() - 2].parse::<usize>().unwrap_or(1);
-                                        let path = parts[..parts.len() - 2].join(":");
-                                        self.open_path_in_tab(Path::new(&path));
-                                        self.active_editor().goto_line(line);
+                        egui::ScrollArea::vertical()
+                            .max_height(110.0)
+                            .show(ui, |ui| {
+                                for nav in self.editors[self.active_tab].lsp_nav_results.clone() {
+                                    if ui.selectable_label(false, &nav).clicked() {
+                                        let cleaned = nav.trim_start_matches("file://");
+                                        let parts: Vec<&str> = cleaned.split(':').collect();
+                                        if parts.len() >= 3 {
+                                            let line = parts[parts.len() - 2]
+                                                .parse::<usize>()
+                                                .unwrap_or(1);
+                                            let path = parts[..parts.len() - 2].join(":");
+                                            self.open_path_in_tab(Path::new(&path));
+                                            self.active_editor().goto_line(line);
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
                         ui.separator();
                         ui.label("Code Actions");
                         let actions = self.editors[self.active_tab].code_actions.clone();
@@ -1624,7 +1748,8 @@ impl LuxApp {
                             ui.label(frame);
                         }
                         if ui.button("Start Debug Session").clicked() {
-                            self.active_editor().lsp_status = "Debug: session requested".to_string();
+                            self.active_editor().lsp_status =
+                                "Debug: session requested".to_string();
                             self.debug_call_stack = vec![
                                 "main()".to_string(),
                                 "app::update()".to_string(),
@@ -1642,7 +1767,10 @@ impl LuxApp {
                             });
                         }
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut self.new_task_name).hint_text("task name"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_task_name)
+                                    .hint_text("task name"),
+                            );
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.new_task_command)
                                     .hint_text("task command"),
@@ -1703,8 +1831,7 @@ impl LuxApp {
                         );
                         if ui.button("Start/Join Session").clicked() {
                             if self.collab_session_id.trim().is_empty() {
-                                self.collab_session_id =
-                                    format!("session-{}", (now_secs() as u64));
+                                self.collab_session_id = format!("session-{}", (now_secs() as u64));
                             }
                             self.collab_enabled = true;
                         }
@@ -1724,19 +1851,17 @@ impl LuxApp {
                                 let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
                                 let note = self.collab_note_input.trim().to_string();
                                 if !note.is_empty() {
-                                    self.collab_notes.entry(path).or_default().push((line, note));
+                                    self.collab_notes
+                                        .entry(path)
+                                        .or_default()
+                                        .push((line, note));
                                     self.collab_note_input.clear();
                                 }
                             }
                         }
                         for (path, notes) in self.collab_notes.clone() {
                             for (line, note) in notes {
-                                ui.label(format!(
-                                    "{}:{} {}",
-                                    path.to_string_lossy(),
-                                    line,
-                                    note
-                                ));
+                                ui.label(format!("{}:{} {}", path.to_string_lossy(), line, note));
                             }
                         }
                         if ui.button("Export Handoff Snapshot").clicked() {
@@ -1878,7 +2003,9 @@ impl LuxApp {
             return;
         }
         let mut cmd = Command::new("sh");
-        cmd.arg("-lc").arg(&cfg.command).current_dir(self.workspace_root.clone());
+        cmd.arg("-lc")
+            .arg(&cfg.command)
+            .current_dir(self.workspace_root.clone());
         for pair in cfg.env_overrides.split(';') {
             let pair = pair.trim();
             if pair.is_empty() {
@@ -1965,11 +2092,13 @@ impl LuxApp {
                     }
                     ui.checkbox(&mut self.terminal_split_panes, "Split");
                 });
-                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
-                    for line in &self.terminal_log {
-                        ui.label(egui::RichText::new(line).monospace().size(11.0));
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(160.0)
+                    .show(ui, |ui| {
+                        for line in &self.terminal_log {
+                            ui.label(egui::RichText::new(line).monospace().size(11.0));
+                        }
+                    });
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.terminal_input)
                         .hint_text("Run shell command..."),
@@ -1982,17 +2111,18 @@ impl LuxApp {
                 }
                 if self.terminal_split_panes {
                     ui.separator();
-                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
-                        for line in &self.terminal_log_secondary {
-                            ui.label(egui::RichText::new(line).monospace().size(11.0));
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for line in &self.terminal_log_secondary {
+                                ui.label(egui::RichText::new(line).monospace().size(11.0));
+                            }
+                        });
                     let resp_secondary = ui.add(
                         egui::TextEdit::singleline(&mut self.terminal_input_secondary)
                             .hint_text("Run in split pane..."),
                     );
-                    if resp_secondary.lost_focus()
-                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    if resp_secondary.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
                     {
                         self.run_terminal_command(true);
                     }
@@ -2075,7 +2205,8 @@ impl LuxApp {
                         if diag.severity >= 4 && !self.diagnostics_show_info {
                             continue;
                         }
-                        let row = format!("Ln {} [{}] {}", diag.line + 1, diag.severity, diag.message);
+                        let row =
+                            format!("Ln {} [{}] {}", diag.line + 1, diag.severity, diag.message);
                         if !self.problems_filter.trim().is_empty()
                             && !row
                                 .to_lowercase()
@@ -2203,7 +2334,11 @@ impl LuxApp {
                     } else {
                         "LSP: snippets-only".to_string()
                     };
-                    let error_count = editor.diagnostics.iter().filter(|d| d.severity <= 2).count();
+                    let error_count = editor
+                        .diagnostics
+                        .iter()
+                        .filter(|d| d.severity <= 2)
+                        .count();
                     editor.notification_badges = error_count
                         + if editor.completion_visible { 1 } else { 0 }
                         + if editor.macro_recording { 1 } else { 0 };
@@ -2447,7 +2582,10 @@ impl LuxApp {
         if let Some(v) = value.get("format_on_type").and_then(|v| v.as_bool()) {
             self.format_on_type = v;
         }
-        if let Some(v) = value.get("plugin_sandbox_enabled").and_then(|v| v.as_bool()) {
+        if let Some(v) = value
+            .get("plugin_sandbox_enabled")
+            .and_then(|v| v.as_bool())
+        {
             self.plugin_sandbox_enabled = v;
         }
         if let Some(v) = value.get("update_channel").and_then(|v| v.as_str()) {
@@ -2488,7 +2626,8 @@ impl LuxApp {
         if baseline == snapshot {
             self.qa_status = "Golden snapshot matched".to_string();
         } else {
-            self.qa_status = "Golden snapshot mismatch (see .lux/qa/latest_snapshot.txt)".to_string();
+            self.qa_status =
+                "Golden snapshot mismatch (see .lux/qa/latest_snapshot.txt)".to_string();
         }
     }
 
@@ -2532,7 +2671,10 @@ impl LuxApp {
     }
 
     fn export_diagnostics_bundle(&mut self) {
-        let path = self.workspace_root.join(".lux").join("support_diagnostics_bundle.json");
+        let path = self
+            .workspace_root
+            .join(".lux")
+            .join("support_diagnostics_bundle.json");
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -2563,13 +2705,21 @@ impl LuxApp {
 
     fn run_health_checks(&mut self) {
         let plugin_count = self.plugins.len();
-        let lsp_status = if self.lsp_rx.is_some() { "busy" } else { "idle" };
+        let lsp_status = if self.lsp_rx.is_some() {
+            "busy"
+        } else {
+            "idle"
+        };
         let bg_tasks = self.editors[self.active_tab].background_tasks;
         self.observability_health_status = format!(
             "Health: plugins={}, lsp={}, background_tasks={}",
             plugin_count, lsp_status, bg_tasks
         );
-        self.log_event("health", LogLevel::Info, &self.observability_health_status.clone());
+        self.log_event(
+            "health",
+            LogLevel::Info,
+            &self.observability_health_status.clone(),
+        );
     }
 
     fn sync_settings_now(&mut self) {
@@ -2646,7 +2796,10 @@ impl LuxApp {
                 }
             }
         }
-        current.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        current.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
         let content = serde_json::Value::Object(current).to_string();
         if std::fs::write(&path, content).is_ok() {
             #[cfg(unix)]
@@ -2654,7 +2807,8 @@ impl LuxApp {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
-            self.secrets_status = "Secret stored in .lux/secrets.json (restricted perms)".to_string();
+            self.secrets_status =
+                "Secret stored in .lux/secrets.json (restricted perms)".to_string();
             self.secret_value_input.clear();
         } else {
             self.secrets_status = "Failed to store secret".to_string();
@@ -3011,7 +3165,9 @@ impl LuxApp {
                         editor.cursors = cursor;
                         editor.scroll_y = scroll_y;
                     }
-                } else if modified > prev && editor.modified && self.pending_external_change.is_none()
+                } else if modified > prev
+                    && editor.modified
+                    && self.pending_external_change.is_none()
                 {
                     self.pending_external_change = Some(ExternalChangePrompt {
                         tab_idx,
@@ -3069,8 +3225,7 @@ impl LuxApp {
             CommandId::RunTask => {
                 if let Some(task) = self.tasks.first().cloned() {
                     self.run_workspace_task(&task.command);
-                    self.active_editor().lsp_status =
-                        format!("Task run: {}", task.name);
+                    self.active_editor().lsp_status = format!("Task run: {}", task.name);
                 } else {
                     self.active_editor().lsp_status = "Task: no tasks configured".to_string();
                 }
@@ -3101,17 +3256,22 @@ impl LuxApp {
                             self.active_editor().lsp_status =
                                 "Plugin command blocked (workspace not trusted)".to_string();
                         } else {
-                            self.active_editor().lsp_status = match crate::plugin::run_plugin_command(
-                                plugin,
-                                command_id,
-                                self.plugin_sandbox_enabled,
-                            ) {
-                                Ok(output) if output.is_empty() => {
-                                    format!("Plugin command ok: {}", command_id)
-                                }
-                                Ok(output) => format!("Plugin command ok: {} ({})", command_id, output),
-                                Err(err) => format!("Plugin command failed: {} ({})", command_id, err),
-                            };
+                            self.active_editor().lsp_status =
+                                match crate::plugin::run_plugin_command(
+                                    plugin,
+                                    command_id,
+                                    self.plugin_sandbox_enabled,
+                                ) {
+                                    Ok(output) if output.is_empty() => {
+                                        format!("Plugin command ok: {}", command_id)
+                                    }
+                                    Ok(output) => {
+                                        format!("Plugin command ok: {} ({})", command_id, output)
+                                    }
+                                    Err(err) => {
+                                        format!("Plugin command failed: {} ({})", command_id, err)
+                                    }
+                                };
                         }
                     } else {
                         self.active_editor().lsp_status = format!("Extension command: {ext}");
@@ -3215,7 +3375,7 @@ impl LuxApp {
             } else if ctrl && i.key_pressed(egui::Key::W) {
                 self.close_tab();
             } else if pressed(format_spec) {
-                    should_format = true;
+                should_format = true;
             } else if pressed(find_spec) {
                 self.show_search = !self.show_search;
                 self.show_replace = false;
@@ -3507,13 +3667,19 @@ impl LuxApp {
                             self.show_sidebar = !self.show_sidebar;
                             ui.close_menu();
                         }
-                        if ui.selectable_label(self.show_dock_panel, "Terminal/Output Panel").clicked() {
+                        if ui
+                            .selectable_label(self.show_dock_panel, "Terminal/Output Panel")
+                            .clicked()
+                        {
                             self.show_dock_panel = !self.show_dock_panel;
                             ui.close_menu();
                         }
                         ui.separator();
                         if ui
-                            .selectable_label(self.split_mode == SplitMode::Vertical, "Split Vertical")
+                            .selectable_label(
+                                self.split_mode == SplitMode::Vertical,
+                                "Split Vertical",
+                            )
                             .clicked()
                         {
                             self.split_mode = if self.split_mode == SplitMode::Vertical {
@@ -3656,7 +3822,10 @@ impl LuxApp {
                         }
                         ui.separator();
                         ui.label("UI Density");
-                        ui.add(egui::Slider::new(&mut self.theme_ui_density, 0.85..=1.35).text("scale"));
+                        ui.add(
+                            egui::Slider::new(&mut self.theme_ui_density, 0.85..=1.35)
+                                .text("scale"),
+                        );
                         if ui.button("Font Preset: Small").clicked() {
                             let workspace = self.active_workspace_key();
                             let entry = self.workspace_fonts.entry(workspace).or_insert(
@@ -3692,8 +3861,12 @@ impl LuxApp {
                         }
                         ui.separator();
                         ui.label("Color Overrides");
-                        let mut bg = self.theme_override_bg.unwrap_or(egui::Color32::from_rgb(39, 40, 34));
-                        let mut text = self.theme_override_text.unwrap_or(egui::Color32::from_rgb(248, 248, 242));
+                        let mut bg = self
+                            .theme_override_bg
+                            .unwrap_or(egui::Color32::from_rgb(39, 40, 34));
+                        let mut text = self
+                            .theme_override_text
+                            .unwrap_or(egui::Color32::from_rgb(248, 248, 242));
                         ui.horizontal(|ui| {
                             ui.label("Background");
                             ui.color_edit_button_srgba(&mut bg);
@@ -3712,18 +3885,21 @@ impl LuxApp {
                         ui.label("Workspace Font");
                         let workspace_root = self.workspace_root.clone();
                         let workspace = self.active_workspace_key();
-                        let entry = self
-                            .workspace_fonts
-                            .entry(workspace)
-                            .or_insert(WorkspaceFontSettings {
+                        let entry = self.workspace_fonts.entry(workspace).or_insert(
+                            WorkspaceFontSettings {
                                 size: 13.5,
                                 family: FontFamilyKind::Monospace,
                                 ligatures: false,
-                            });
+                            },
+                        );
                         ui.add(egui::Slider::new(&mut entry.size, 10.0..=24.0).text("Font Size"));
                         ui.horizontal(|ui| {
                             ui.label("Family");
-                            ui.selectable_value(&mut entry.family, FontFamilyKind::Monospace, "Monospace");
+                            ui.selectable_value(
+                                &mut entry.family,
+                                FontFamilyKind::Monospace,
+                                "Monospace",
+                            );
                             ui.selectable_value(
                                 &mut entry.family,
                                 FontFamilyKind::Proportional,
@@ -3762,9 +3938,21 @@ impl LuxApp {
 
                     ui.menu_button(rich_label("Keymap"), |ui| {
                         ui.label("Preset");
-                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::Vscode, "VSCode");
-                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::Sublime, "Sublime");
-                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::JetBrains, "JetBrains");
+                        ui.selectable_value(
+                            &mut self.keymap_preset,
+                            KeymapPreset::Vscode,
+                            "VSCode",
+                        );
+                        ui.selectable_value(
+                            &mut self.keymap_preset,
+                            KeymapPreset::Sublime,
+                            "Sublime",
+                        );
+                        ui.selectable_value(
+                            &mut self.keymap_preset,
+                            KeymapPreset::JetBrains,
+                            "JetBrains",
+                        );
                         ui.separator();
                         ui.label("Custom bindings (e.g. Cmd+Shift+P)");
                         ui.horizontal(|ui| {
@@ -3805,18 +3993,29 @@ impl LuxApp {
                     });
 
                     ui.menu_button(rich_label("Platform"), |ui| {
-                        ui.checkbox(&mut self.telemetry_opt_in, "Telemetry Opt-in (explicit consent)");
+                        ui.checkbox(
+                            &mut self.telemetry_opt_in,
+                            "Telemetry Opt-in (explicit consent)",
+                        );
                         ui.checkbox(&mut self.plugin_sandbox_enabled, "Plugin Sandbox Enabled");
                         ui.label(format!(
                             "Safe Mode: {}",
-                            if self.safe_mode { "ON (untrusted workspace)" } else { "OFF" }
+                            if self.safe_mode {
+                                "ON (untrusted workspace)"
+                            } else {
+                                "OFF"
+                            }
                         ));
                         ui.label(format!("Loaded plugins: {}", self.plugins.len()));
-                        let syntax_count: usize = self.plugins.iter().map(|p| p.syntax_packages.len()).sum();
-                        let formatter_count: usize = self.plugins.iter().map(|p| p.formatters.len()).sum();
+                        let syntax_count: usize =
+                            self.plugins.iter().map(|p| p.syntax_packages.len()).sum();
+                        let formatter_count: usize =
+                            self.plugins.iter().map(|p| p.formatters.len()).sum();
                         let task_count: usize = self.plugins.iter().map(|p| p.tasks.len()).sum();
-                        let keymap_count: usize = self.plugins.iter().map(|p| p.keymaps.len()).sum();
-                        let script_count: usize = self.plugins.iter().map(|p| p.scripts.len()).sum();
+                        let keymap_count: usize =
+                            self.plugins.iter().map(|p| p.keymaps.len()).sum();
+                        let script_count: usize =
+                            self.plugins.iter().map(|p| p.scripts.len()).sum();
                         ui.label(format!(
                             "Contribs syntax:{} formatters:{} tasks:{} keymaps:{} scripts:{}",
                             syntax_count, formatter_count, task_count, keymap_count, script_count
@@ -3824,7 +4023,8 @@ impl LuxApp {
                         ui.separator();
                         ui.label("Marketplace / Registry");
                         if ui.button("Reload Registry").clicked() {
-                            self.registry_entries = crate::plugin::load_registry(&self.workspace_root);
+                            self.registry_entries =
+                                crate::plugin::load_registry(&self.workspace_root);
                         }
                         for entry in self.registry_entries.clone() {
                             ui.horizontal(|ui| {
@@ -3838,7 +4038,8 @@ impl LuxApp {
                                             Ok(_) => "Plugin installed/updated".to_string(),
                                             Err(err) => format!("Install failed: {err}"),
                                         };
-                                    self.plugins = crate::plugin::load_plugin_manifests(&self.workspace_root);
+                                    self.plugins =
+                                        crate::plugin::load_plugin_manifests(&self.workspace_root);
                                     for plugin in &self.plugins {
                                         let tuples: Vec<(String, String, String)> = plugin
                                             .commands
@@ -3866,9 +4067,17 @@ impl LuxApp {
                         }
                         ui.separator();
                         ui.label("Update Channel");
-                        ui.selectable_value(&mut self.update_channel, UpdateChannel::Stable, "Stable");
+                        ui.selectable_value(
+                            &mut self.update_channel,
+                            UpdateChannel::Stable,
+                            "Stable",
+                        );
                         ui.selectable_value(&mut self.update_channel, UpdateChannel::Beta, "Beta");
-                        ui.selectable_value(&mut self.update_channel, UpdateChannel::Nightly, "Nightly");
+                        ui.selectable_value(
+                            &mut self.update_channel,
+                            UpdateChannel::Nightly,
+                            "Nightly",
+                        );
                         ui.separator();
                         ui.checkbox(&mut self.portable_mode, "Portable Mode");
                         if ui.button("Build Release Artifacts").clicked() {
@@ -3931,10 +4140,26 @@ impl LuxApp {
                         ui.label("Observability");
                         ui.horizontal(|ui| {
                             ui.label("Level");
-                            ui.selectable_value(&mut self.observability_level, LogLevel::Error, "Error");
-                            ui.selectable_value(&mut self.observability_level, LogLevel::Warn, "Warn");
-                            ui.selectable_value(&mut self.observability_level, LogLevel::Info, "Info");
-                            ui.selectable_value(&mut self.observability_level, LogLevel::Debug, "Debug");
+                            ui.selectable_value(
+                                &mut self.observability_level,
+                                LogLevel::Error,
+                                "Error",
+                            );
+                            ui.selectable_value(
+                                &mut self.observability_level,
+                                LogLevel::Warn,
+                                "Warn",
+                            );
+                            ui.selectable_value(
+                                &mut self.observability_level,
+                                LogLevel::Info,
+                                "Info",
+                            );
+                            ui.selectable_value(
+                                &mut self.observability_level,
+                                LogLevel::Debug,
+                                "Debug",
+                            );
                         });
                         ui.add(
                             egui::TextEdit::singleline(&mut self.observability_module_filter)
@@ -3992,7 +4217,10 @@ impl LuxApp {
                                 self.lint_workspace_overrides.insert(rule, value);
                             }
                         }
-                        if ui.button("Set Folder Override (active file folder)").clicked() {
+                        if ui
+                            .button("Set Folder Override (active file folder)")
+                            .clicked()
+                        {
                             let rule = self.lint_override_rule_input.trim().to_string();
                             let value = self.lint_override_value_input.trim().to_string();
                             if !rule.is_empty() && !value.is_empty() {
@@ -4067,6 +4295,8 @@ impl LuxApp {
                 let mut tab_action: Option<TabAction> = None;
                 let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos());
                 let pointer_released = ui.ctx().input(|i| i.pointer.any_released());
+                let mut primary_drop_rect: Option<egui::Rect> = None;
+                let mut secondary_drop_rect: Option<egui::Rect> = None;
 
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::Vec2::ZERO; // Connect tabs
@@ -4091,7 +4321,7 @@ impl LuxApp {
                                     } else {
                                         egui::Color32::from_rgb(180, 180, 180)
                                     };
-                                    
+
                                     // Calculate Width
                                     let font = egui::FontId::proportional(12.5); // Slightly larger
                                     let text_width = ui.fonts(|f| {
@@ -4102,13 +4332,13 @@ impl LuxApp {
                                     let tab_width =
                                         text_width + TAB_PADDING_X * 2.0 + TAB_CLOSE_SIZE + 8.0;
                                     if self.editors.len() <= 1 {
-                                       // Even single tab might want a close button in modern designs, 
-                                       // but let's keep it optional if space is tight? 
-                                       // Actuall VS code usually shows it on hover.
-                                       // For now, let's include space for it to avoid jumping.
+                                        // Even single tab might want a close button in modern designs,
+                                        // but let's keep it optional if space is tight?
+                                        // Actuall VS code usually shows it on hover.
+                                        // For now, let's include space for it to avoid jumping.
                                     }
                                     let tab_width = tab_width.clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
-                                    
+
                                     let (rect, response) = ui.allocate_exact_size(
                                         egui::Vec2::new(tab_width, TAB_HEIGHT),
                                         egui::Sense::click(),
@@ -4123,13 +4353,13 @@ impl LuxApp {
                                     } else {
                                         TAB_INACTIVE_BG
                                     };
-                                    
+
                                     // Custom Tab Painting
                                     let painter = ui.painter();
-                                    
+
                                     // Main tab shape
                                     painter.rect_filled(rect, 0.0, bg);
-                                    
+
                                     // Active top border
                                     if is_active {
                                         painter.rect_filled(
@@ -4163,7 +4393,7 @@ impl LuxApp {
                                         );
                                         text_x += 14.0;
                                     } else {
-                                         // Maybe an icon here? For now just text.
+                                        // Maybe an icon here? For now just text.
                                     }
 
                                     // File Name
@@ -4192,34 +4422,51 @@ impl LuxApp {
                                             ),
                                             egui::Vec2::new(TAB_CLOSE_SIZE, TAB_CLOSE_SIZE),
                                         );
-                                        
+
                                         // Check interaction specifically on the small close rect
                                         let close_resp = ui.interact(
                                             close_rect,
                                             ui.id().with(("tab_close", i)),
-                                            egui::Sense::click()
+                                            egui::Sense::click(),
                                         );
-                                        
+
                                         let close_hovered = close_resp.hovered();
-                                        
+
                                         // Draw 'x'
                                         // Rotate 45deg +
                                         let center = close_rect.center();
                                         if close_hovered {
-                                             painter.rect_filled(close_rect, 2.0, egui::Color32::from_white_alpha(30));
+                                            painter.rect_filled(
+                                                close_rect,
+                                                2.0,
+                                                egui::Color32::from_white_alpha(30),
+                                            );
                                         }
-                                        
-                                        let stroke = egui::Stroke::new(1.0, if close_hovered { egui::Color32::WHITE } else { egui::Color32::from_gray(150) });
+
+                                        let stroke = egui::Stroke::new(
+                                            1.0,
+                                            if close_hovered {
+                                                egui::Color32::WHITE
+                                            } else {
+                                                egui::Color32::from_gray(150)
+                                            },
+                                        );
                                         // Manually draw X for better control than text
                                         let r = TAB_CLOSE_SIZE / 3.0;
-                                        painter.line_segment([
-                                            center + egui::Vec2::new(-r, -r),
-                                            center + egui::Vec2::new(r, r)
-                                        ], stroke);
-                                        painter.line_segment([
-                                            center + egui::Vec2::new(-r, r),
-                                            center + egui::Vec2::new(r, -r)
-                                        ], stroke);
+                                        painter.line_segment(
+                                            [
+                                                center + egui::Vec2::new(-r, -r),
+                                                center + egui::Vec2::new(r, r),
+                                            ],
+                                            stroke,
+                                        );
+                                        painter.line_segment(
+                                            [
+                                                center + egui::Vec2::new(-r, r),
+                                                center + egui::Vec2::new(r, -r),
+                                            ],
+                                            stroke,
+                                        );
 
                                         if close_resp.clicked() {
                                             tab_action = Some(TabAction::Close(i));
@@ -4246,17 +4493,30 @@ impl LuxApp {
                                             tab_action = Some(TabAction::TogglePin(i, !pinned));
                                             ui.close_menu();
                                         }
+                                        ui.separator();
+                                        if ui.button("Move to Primary Split").clicked() {
+                                            tab_action = Some(TabAction::MoveToSplit(i, false));
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Move to Secondary Split").clicked() {
+                                            tab_action = Some(TabAction::MoveToSplit(i, true));
+                                            ui.close_menu();
+                                        }
                                     });
 
                                     if response.drag_started() {
                                         self.dragging_tab = Some(i);
                                     }
                                 }
-                                
+
                                 // New Tab Button (small)
-                                let new_tab_resp = ui.allocate_response(egui::Vec2::new(32.0, TAB_HEIGHT), egui::Sense::click());
+                                let new_tab_resp = ui.allocate_response(
+                                    egui::Vec2::new(32.0, TAB_HEIGHT),
+                                    egui::Sense::click(),
+                                );
                                 if new_tab_resp.hovered() {
-                                    ui.painter().rect_filled(new_tab_resp.rect, 0.0, TAB_HOVER_BG);
+                                    ui.painter()
+                                        .rect_filled(new_tab_resp.rect, 0.0, TAB_HOVER_BG);
                                 }
                                 ui.painter().text(
                                     new_tab_resp.rect.center(),
@@ -4270,12 +4530,80 @@ impl LuxApp {
                                 }
                             });
                         });
+
+                    if self.split_mode != SplitMode::None || self.dragging_tab.is_some() {
+                        ui.add_space(8.0);
+                        let dragging = self.dragging_tab.is_some();
+                        let (primary_rect, primary_resp) = ui.allocate_exact_size(
+                            egui::Vec2::new(82.0, TAB_HEIGHT - 6.0),
+                            egui::Sense::hover(),
+                        );
+                        primary_drop_rect = Some(primary_rect);
+                        let primary_hovered = pointer_pos
+                            .map(|pos| primary_rect.contains(pos))
+                            .unwrap_or(false);
+                        let primary_bg = if dragging && primary_hovered {
+                            egui::Color32::from_rgb(0, 122, 204)
+                        } else {
+                            TAB_INACTIVE_BG
+                        };
+                        ui.painter().rect_filled(primary_rect, 4.0, primary_bg);
+                        ui.painter().text(
+                            primary_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Primary",
+                            egui::FontId::proportional(11.5),
+                            egui::Color32::from_gray(220),
+                        );
+                        primary_resp.on_hover_text("Drop tab to move into primary split");
+
+                        ui.add_space(4.0);
+                        let (secondary_rect, secondary_resp) = ui.allocate_exact_size(
+                            egui::Vec2::new(92.0, TAB_HEIGHT - 6.0),
+                            egui::Sense::hover(),
+                        );
+                        secondary_drop_rect = Some(secondary_rect);
+                        let secondary_hovered = pointer_pos
+                            .map(|pos| secondary_rect.contains(pos))
+                            .unwrap_or(false);
+                        let secondary_bg = if dragging && secondary_hovered {
+                            egui::Color32::from_rgb(0, 122, 204)
+                        } else {
+                            TAB_INACTIVE_BG
+                        };
+                        ui.painter().rect_filled(secondary_rect, 4.0, secondary_bg);
+                        ui.painter().text(
+                            secondary_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Secondary",
+                            egui::FontId::proportional(11.5),
+                            egui::Color32::from_gray(220),
+                        );
+                        secondary_resp.on_hover_text("Drop tab to move into secondary split");
+                    }
                 });
 
                 if pointer_released {
                     if let (Some(drag_idx), Some(pos)) = (self.dragging_tab, pointer_pos) {
-                        if let Some(target_idx) = find_drop_target(drag_idx, pos, &tab_rects) {
-                            tab_action = Some(TabAction::Reorder(drag_idx, target_idx));
+                        let mut dropped_in_split_target = false;
+                        if let Some(rect) = primary_drop_rect {
+                            if rect.contains(pos) {
+                                tab_action = Some(TabAction::MoveToSplit(drag_idx, false));
+                                dropped_in_split_target = true;
+                            }
+                        }
+                        if !dropped_in_split_target {
+                            if let Some(rect) = secondary_drop_rect {
+                                if rect.contains(pos) {
+                                    tab_action = Some(TabAction::MoveToSplit(drag_idx, true));
+                                    dropped_in_split_target = true;
+                                }
+                            }
+                        }
+                        if !dropped_in_split_target {
+                            if let Some(target_idx) = find_drop_target(drag_idx, pos, &tab_rects) {
+                                tab_action = Some(TabAction::Reorder(drag_idx, target_idx));
+                            }
                         }
                     }
                     self.dragging_tab = None;
@@ -4289,6 +4617,9 @@ impl LuxApp {
                         TabAction::ReopenClosed => self.reopen_closed_tab(),
                         TabAction::TogglePin(idx, pinned) => self.pin_tab(idx, pinned),
                         TabAction::Reorder(from, to) => self.move_tab(from, to),
+                        TabAction::MoveToSplit(idx, secondary) => {
+                            self.move_tab_to_split(idx, secondary)
+                        }
                         TabAction::NewTab => self.new_tab(),
                     }
                 }
@@ -4355,9 +4686,12 @@ impl LuxApp {
                     // Toggles for options could go here
 
                     if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("\u{1F5D9}").size(14.0), // Cancel X
-                        ).frame(false))
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("\u{1F5D9}").size(14.0), // Cancel X
+                            )
+                            .frame(false),
+                        )
                         .clicked()
                     {
                         self.show_search = false;
@@ -4401,9 +4735,7 @@ impl LuxApp {
                         }
 
                         if ui
-                            .add(egui::Button::new(
-                                egui::RichText::new("All").size(12.0),
-                            ))
+                            .add(egui::Button::new(egui::RichText::new("All").size(12.0)))
                             .clicked()
                         {
                             let find = self.search_input.clone();
@@ -4453,7 +4785,7 @@ impl LuxApp {
                     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.show_goto_line = false;
                     }
-                    
+
                     if ui.button("Go").clicked() {
                         if let Ok(line) = self.goto_line_input.trim().parse::<usize>() {
                             self.active_editor().goto_line(line);
@@ -4495,10 +4827,10 @@ impl LuxApp {
                         } else {
                             egui::Color32::from_rgb(120, 120, 120)
                         };
-                        
+
                         // Clickable logic could go here later
                         ui.label(egui::RichText::new(part).color(color).size(12.0));
-                        
+
                         if !is_last {
                             ui.label(
                                 egui::RichText::new("›")
@@ -4707,30 +5039,128 @@ impl eframe::App for LuxApp {
         }
 
         if self.show_onboarding {
+            let mut open_file = false;
+            let mut open_clone = false;
+            let mut open_palette = false;
+            let mut close_now = false;
             egui::Window::new("Onboarding")
                 .open(&mut self.show_onboarding)
                 .resizable(false)
+                .default_size([680.0, 440.0])
                 .show(ctx, |ui| {
-                    let steps = [
-                        "Open a file from File > Open.",
-                        "Use Search tab for workspace search and symbol navigation.",
-                        "Use Refactor menu for rename/extract/organize imports.",
-                        "Use Debug tab to add breakpoints and run tasks.",
-                        "Tune font/theme in Theme menu.",
-                    ];
-                    let step = self.onboarding_step.min(steps.len().saturating_sub(1));
-                    ui.label(format!("Step {}/{}", step + 1, steps.len()));
+                    ui.heading(
+                        egui::RichText::new("Welcome to Lux")
+                            .size(22.0)
+                            .color(egui::Color32::from_rgb(214, 214, 214)),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "A quick setup flow inspired by modern IDE onboarding.",
+                        )
+                        .size(13.0),
+                    );
                     ui.separator();
-                    ui.label(steps[step]);
-                    ui.horizontal(|ui| {
-                        if ui.button("Prev").clicked() {
-                            self.onboarding_step = self.onboarding_step.saturating_sub(1);
-                        }
-                        if ui.button("Next").clicked() {
-                            self.onboarding_step = (self.onboarding_step + 1).min(steps.len() - 1);
-                        }
+                    ui.columns(2, |columns| {
+                        columns[0].group(|ui| {
+                            ui.label(egui::RichText::new("Start").strong());
+                            ui.add_space(4.0);
+                            if ui.button("Open File...").clicked() {
+                                open_file = true;
+                            }
+                            if ui.button("Clone Repository...").clicked() {
+                                open_clone = true;
+                            }
+                            if ui.button("Open Command Palette").clicked() {
+                                open_palette = true;
+                            }
+                            ui.separator();
+                            if ui.button("Explorer").clicked() {
+                                self.show_sidebar = true;
+                                self.sidebar_tab = SidebarTab::Explorer;
+                            }
+                            if ui.button("Search").clicked() {
+                                self.show_sidebar = true;
+                                self.sidebar_tab = SidebarTab::Search;
+                            }
+                            if ui.button("Source Control").clicked() {
+                                self.show_sidebar = true;
+                                self.sidebar_tab = SidebarTab::Git;
+                            }
+                            if ui.button("Run and Debug").clicked() {
+                                self.show_sidebar = true;
+                                self.sidebar_tab = SidebarTab::Debug;
+                            }
+                            if ui.button("Show Terminal Panel").clicked() {
+                                self.show_dock_panel = true;
+                                self.dock_tab = DockPanelTab::Terminal;
+                            }
+                        });
+
+                        columns[1].group(|ui| {
+                            let steps = [
+                                ("Open a project file", "Use Ctrl+O or File > Open."),
+                                (
+                                    "Search and navigate",
+                                    "Use the Search panel for text/symbol lookup.",
+                                ),
+                                (
+                                    "Refactor safely",
+                                    "Use the Refactor menu and preview changes.",
+                                ),
+                                ("Run tasks", "Use Run and Debug to launch tasks/configs."),
+                                ("Tune appearance", "Pick theme and fonts from Theme menu."),
+                            ];
+                            ui.label(egui::RichText::new("Getting Started").strong());
+                            ui.add_space(4.0);
+                            for (idx, (title, _)) in steps.iter().enumerate() {
+                                let selected = idx == self.onboarding_step;
+                                if ui.selectable_label(selected, *title).clicked() {
+                                    self.onboarding_step = idx;
+                                }
+                            }
+                            ui.separator();
+                            let step = self.onboarding_step.min(steps.len().saturating_sub(1));
+                            let (title, body) = steps[step];
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "Step {} of {}: {}",
+                                    step + 1,
+                                    steps.len(),
+                                    title
+                                ))
+                                .strong(),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(body);
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("Prev").clicked() {
+                                    self.onboarding_step = self.onboarding_step.saturating_sub(1);
+                                }
+                                if ui.button("Next").clicked() {
+                                    self.onboarding_step =
+                                        (self.onboarding_step + 1).min(steps.len() - 1);
+                                }
+                            });
+                            ui.add_space(6.0);
+                            if ui.button("Done").clicked() {
+                                close_now = true;
+                            }
+                        });
                     });
                 });
+            if close_now {
+                self.show_onboarding = false;
+            }
+            if open_file {
+                self.open_file();
+            }
+            if open_clone {
+                self.show_clone_repo_dialog = true;
+            }
+            if open_palette {
+                self.command_palette.visible = true;
+            }
         }
 
         if self.show_troubleshooting {
@@ -4785,206 +5215,207 @@ impl eframe::App for LuxApp {
 
 impl LuxApp {
     fn render_main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-                if !self.focus_mode {
-                    self.show_left_sidebar(ui);
-                    self.show_git_panel_ui(ui);
-                }
-                self.show_dock_panel(ui, ctx);
+        if !self.focus_mode {
+            self.show_activity_bar(ui);
+            self.show_left_sidebar(ui);
+            self.show_git_panel_ui(ui);
+        }
+        self.show_dock_panel(ui, ctx);
 
-                if !self.zen_mode {
-                    self.show_tab_bar(ui);
-                    self.show_breadcrumbs(ui);
-                    self.show_search_bar(ui);
-                    self.show_goto_line_bar(ui);
-                }
+        if !self.zen_mode {
+            self.show_tab_bar(ui);
+            self.show_breadcrumbs(ui);
+            self.show_search_bar(ui);
+            self.show_goto_line_bar(ui);
+        }
 
-                ui.add_space(0.0);
+        ui.add_space(0.0);
 
-                // Editor area (takes remaining space minus status bar)
-                let status_bar_height = if self.zen_mode { 0.0 } else { 24.0 };
-                let available = ui.available_rect_before_wrap();
-                let editor_rect = egui::Rect::from_min_max(
-                    available.min,
-                    egui::Pos2::new(available.max.x, available.max.y - status_bar_height),
+        // Editor area (takes remaining space minus status bar)
+        let status_bar_height = if self.zen_mode { 0.0 } else { 24.0 };
+        let available = ui.available_rect_before_wrap();
+        let editor_rect = egui::Rect::from_min_max(
+            available.min,
+            egui::Pos2::new(available.max.x, available.max.y - status_bar_height),
+        );
+        let editor_idx = self.active_tab;
+        let show_preview = {
+            let editor = &self.editors[editor_idx];
+            editor.is_markdown() && editor.markdown_preview
+        };
+        let preview_text = if show_preview {
+            Some(self.editors[editor_idx].rope.to_string())
+        } else {
+            None
+        };
+
+        let auto_focus = !self.show_search
+            && !self.show_goto_line
+            && !self.command_palette.visible
+            && self.confirm_close_tab.is_none();
+        let mut editor_theme = self.editor_theme.palette();
+        if let Some(bg) = self.theme_override_bg {
+            editor_theme.background = bg;
+            editor_theme.gutter_bg = bg;
+        }
+        if let Some(text) = self.theme_override_text {
+            editor_theme.text = text;
+            editor_theme.cursor = text;
+        }
+        let font_settings = self.current_font_settings();
+        let search_query_owned = if self.search_input.trim().is_empty() {
+            None
+        } else {
+            Some(self.search_input.clone())
+        };
+        let search_query = search_query_owned.as_deref();
+
+        let min_editor_width = 360.0;
+        let min_preview_width = 260.0;
+        let can_split = editor_rect.width() > (min_editor_width + min_preview_width);
+
+        self.ensure_split_secondary();
+        if let Some(secondary_idx) = self.split_secondary_tab {
+            if self.split_mode != SplitMode::None
+                && secondary_idx < self.editors.len()
+                && secondary_idx != self.active_tab
+            {
+                let (first_rect, second_rect) = if self.split_mode == SplitMode::Vertical {
+                    let w = editor_rect.width() / 2.0;
+                    (
+                        egui::Rect::from_min_max(
+                            editor_rect.min,
+                            egui::Pos2::new(editor_rect.min.x + w - 1.0, editor_rect.max.y),
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::Pos2::new(editor_rect.min.x + w + 1.0, editor_rect.min.y),
+                            editor_rect.max,
+                        ),
+                    )
+                } else {
+                    let h = editor_rect.height() / 2.0;
+                    (
+                        egui::Rect::from_min_max(
+                            editor_rect.min,
+                            egui::Pos2::new(editor_rect.max.x, editor_rect.min.y + h - 1.0),
+                        ),
+                        egui::Rect::from_min_max(
+                            egui::Pos2::new(editor_rect.min.x, editor_rect.min.y + h + 1.0),
+                            editor_rect.max,
+                        ),
+                    )
+                };
+                let active_idx = self.active_tab;
+                let (editors, clipboard, highlighter) =
+                    (&mut self.editors, &mut self.clipboard, &self.highlighter);
+                let (first_editor, second_editor) = if active_idx < secondary_idx {
+                    let (left, right) = editors.split_at_mut(secondary_idx);
+                    (&mut left[active_idx], &mut right[0])
+                } else {
+                    let (left, right) = editors.split_at_mut(active_idx);
+                    (&mut right[0], &mut left[secondary_idx])
+                };
+                let mut first_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(first_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
                 );
-                let editor_idx = self.active_tab;
-                let show_preview = {
-                    let editor = &self.editors[editor_idx];
-                    editor.is_markdown() && editor.markdown_preview
-                };
-                let preview_text = if show_preview {
-                    Some(self.editors[editor_idx].rope.to_string())
-                } else {
-                    None
-                };
+                crate::ui::editor_view::show(
+                    &mut first_ui,
+                    first_editor,
+                    clipboard,
+                    highlighter,
+                    &editor_theme,
+                    &font_settings,
+                    search_query,
+                    auto_focus,
+                );
+                let mut second_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(second_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                crate::ui::editor_view::show(
+                    &mut second_ui,
+                    second_editor,
+                    clipboard,
+                    highlighter,
+                    &editor_theme,
+                    &font_settings,
+                    search_query,
+                    false,
+                );
+            }
+        } else if show_preview && can_split {
+            let preview_width = (editor_rect.width() * 0.42)
+                .clamp(min_preview_width, editor_rect.width() - min_editor_width);
+            let editor_width = editor_rect.width() - preview_width;
+            let editor_rect = egui::Rect::from_min_max(
+                editor_rect.min,
+                egui::Pos2::new(editor_rect.min.x + editor_width, editor_rect.max.y),
+            );
+            let preview_rect = egui::Rect::from_min_max(
+                egui::Pos2::new(editor_rect.max.x, editor_rect.min.y),
+                egui::Pos2::new(editor_rect.max.x + preview_width, editor_rect.max.y),
+            );
 
-                let auto_focus = !self.show_search
-                    && !self.show_goto_line
-                    && !self.command_palette.visible
-                    && self.confirm_close_tab.is_none();
-                let mut editor_theme = self.editor_theme.palette();
-                if let Some(bg) = self.theme_override_bg {
-                    editor_theme.background = bg;
-                    editor_theme.gutter_bg = bg;
-                }
-                if let Some(text) = self.theme_override_text {
-                    editor_theme.text = text;
-                    editor_theme.cursor = text;
-                }
-                let font_settings = self.current_font_settings();
-                let search_query_owned = if self.search_input.trim().is_empty() {
-                    None
-                } else {
-                    Some(self.search_input.clone())
-                };
-                let search_query = search_query_owned.as_deref();
+            let separator_rect = egui::Rect::from_min_max(
+                egui::Pos2::new(preview_rect.min.x - 1.0, preview_rect.min.y),
+                egui::Pos2::new(preview_rect.min.x, preview_rect.max.y),
+            );
+            ui.painter()
+                .rect_filled(separator_rect, 0.0, egui::Color32::from_rgb(55, 55, 58));
 
-                let min_editor_width = 360.0;
-                let min_preview_width = 260.0;
-                let can_split = editor_rect.width() > (min_editor_width + min_preview_width);
+            let mut editor_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(editor_rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+            );
+            crate::ui::editor_view::show(
+                &mut editor_ui,
+                &mut self.editors[self.active_tab],
+                &mut self.clipboard,
+                &self.highlighter,
+                &editor_theme,
+                &font_settings,
+                search_query,
+                auto_focus,
+            );
 
-                self.ensure_split_secondary();
-                if let Some(secondary_idx) = self.split_secondary_tab {
-                    if self.split_mode != SplitMode::None && secondary_idx < self.editors.len() && secondary_idx != self.active_tab {
-                        let (first_rect, second_rect) = if self.split_mode == SplitMode::Vertical {
-                            let w = editor_rect.width() / 2.0;
-                            (
-                                egui::Rect::from_min_max(
-                                    editor_rect.min,
-                                    egui::Pos2::new(editor_rect.min.x + w - 1.0, editor_rect.max.y),
-                                ),
-                                egui::Rect::from_min_max(
-                                    egui::Pos2::new(editor_rect.min.x + w + 1.0, editor_rect.min.y),
-                                    editor_rect.max,
-                                ),
-                            )
-                        } else {
-                            let h = editor_rect.height() / 2.0;
-                            (
-                                egui::Rect::from_min_max(
-                                    editor_rect.min,
-                                    egui::Pos2::new(editor_rect.max.x, editor_rect.min.y + h - 1.0),
-                                ),
-                                egui::Rect::from_min_max(
-                                    egui::Pos2::new(editor_rect.min.x, editor_rect.min.y + h + 1.0),
-                                    editor_rect.max,
-                                ),
-                            )
-                        };
-                        let active_idx = self.active_tab;
-                        let (editors, clipboard, highlighter) =
-                            (&mut self.editors, &mut self.clipboard, &self.highlighter);
-                        let (first_editor, second_editor) = if active_idx < secondary_idx {
-                            let (left, right) = editors.split_at_mut(secondary_idx);
-                            (&mut left[active_idx], &mut right[0])
-                        } else {
-                            let (left, right) = editors.split_at_mut(active_idx);
-                            (&mut right[0], &mut left[secondary_idx])
-                        };
-                        let mut first_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(first_rect)
-                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                        );
-                        crate::ui::editor_view::show(
-                            &mut first_ui,
-                            first_editor,
-                            clipboard,
-                            highlighter,
-                            &editor_theme,
-                            &font_settings,
-                            search_query,
-                            auto_focus,
-                        );
-                        let mut second_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(second_rect)
-                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                        );
-                        crate::ui::editor_view::show(
-                            &mut second_ui,
-                            second_editor,
-                            clipboard,
-                            highlighter,
-                            &editor_theme,
-                            &font_settings,
-                            search_query,
-                            false,
-                        );
-                    }
-                } else if show_preview && can_split {
-                    let preview_width = (editor_rect.width() * 0.42)
-                        .clamp(min_preview_width, editor_rect.width() - min_editor_width);
-                    let editor_width = editor_rect.width() - preview_width;
-                    let editor_rect = egui::Rect::from_min_max(
-                        editor_rect.min,
-                        egui::Pos2::new(editor_rect.min.x + editor_width, editor_rect.max.y),
-                    );
-                    let preview_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(editor_rect.max.x, editor_rect.min.y),
-                        egui::Pos2::new(editor_rect.max.x + preview_width, editor_rect.max.y),
-                    );
+            if let Some(text) = preview_text.as_deref() {
+                let mut preview_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(preview_rect)
+                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                );
+                markdown_preview::show(&mut preview_ui, text);
+            }
+        } else {
+            let mut editor_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(editor_rect)
+                    .layout(egui::Layout::top_down(egui::Align::LEFT)),
+            );
+            crate::ui::editor_view::show(
+                &mut editor_ui,
+                &mut self.editors[self.active_tab],
+                &mut self.clipboard,
+                &self.highlighter,
+                &editor_theme,
+                &font_settings,
+                search_query,
+                auto_focus,
+            );
+        }
 
-                    let separator_rect = egui::Rect::from_min_max(
-                        egui::Pos2::new(preview_rect.min.x - 1.0, preview_rect.min.y),
-                        egui::Pos2::new(preview_rect.min.x, preview_rect.max.y),
-                    );
-                    ui.painter().rect_filled(
-                        separator_rect,
-                        0.0,
-                        egui::Color32::from_rgb(55, 55, 58),
-                    );
-
-                    let mut editor_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(editor_rect)
-                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                    );
-                    crate::ui::editor_view::show(
-                        &mut editor_ui,
-                        &mut self.editors[self.active_tab],
-                        &mut self.clipboard,
-                        &self.highlighter,
-                        &editor_theme,
-                        &font_settings,
-                        search_query,
-                        auto_focus,
-                    );
-
-                    if let Some(text) = preview_text.as_deref() {
-                        let mut preview_ui = ui.new_child(
-                            egui::UiBuilder::new()
-                                .max_rect(preview_rect)
-                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                        );
-                        markdown_preview::show(&mut preview_ui, text);
-                    }
-                } else {
-                    let mut editor_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(editor_rect)
-                            .layout(egui::Layout::top_down(egui::Align::LEFT)),
-                    );
-                    crate::ui::editor_view::show(
-                        &mut editor_ui,
-                        &mut self.editors[self.active_tab],
-                        &mut self.clipboard,
-                        &self.highlighter,
-                        &editor_theme,
-                        &font_settings,
-                        search_query,
-                        auto_focus,
-                    );
-                }
-
-                if !self.zen_mode {
-                    crate::ui::status_bar::show(
-                        ui,
-                        &mut self.editors[self.active_tab],
-                        self.git_info.as_ref(),
-                        &self.highlighter,
-                    );
-                }
+        if !self.zen_mode {
+            crate::ui::status_bar::show(
+                ui,
+                &mut self.editors[self.active_tab],
+                self.git_info.as_ref(),
+                &self.highlighter,
+            );
+        }
     }
 }
 
@@ -5013,6 +5444,23 @@ fn find_drop_target(
         }
     }
     best.map(|(idx, _)| idx).filter(|idx| *idx != dragging_idx)
+}
+
+fn remap_tab_index_after_move(idx: usize, from: usize, to: usize) -> usize {
+    if idx == from {
+        return to;
+    }
+    if from < to {
+        if (from + 1..=to).contains(&idx) {
+            idx - 1
+        } else {
+            idx
+        }
+    } else if (to..from).contains(&idx) {
+        idx + 1
+    } else {
+        idx
+    }
 }
 
 fn resolve_git_root(cwd: &Path) -> Option<PathBuf> {
@@ -5093,7 +5541,9 @@ fn read_git_diff_for_file(repo: &Path, file: &str) -> String {
         .current_dir(repo)
         .output();
     match output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_string(),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).to_string()
+        }
         _ => String::new(),
     }
 }
@@ -5115,7 +5565,9 @@ fn read_active_line_blame(repo: &Path, editor: &Editor) -> String {
         .current_dir(repo)
         .output();
     match output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
         _ => "Blame unavailable".to_string(),
     }
 }
@@ -5219,12 +5671,17 @@ fn read_git_info(cwd: Option<&Path>) -> Option<crate::ui::status_bar::GitInfo> {
     let cwd = cwd?;
 
     let mut rev_cmd = Command::new("git");
-    rev_cmd.arg("rev-parse").arg("--show-toplevel").current_dir(cwd);
+    rev_cmd
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .current_dir(cwd);
     let rev_output = rev_cmd.output().ok()?;
     if !rev_output.status.success() {
         return None;
     }
-    let toplevel = String::from_utf8_lossy(&rev_output.stdout).trim().to_string();
+    let toplevel = String::from_utf8_lossy(&rev_output.stdout)
+        .trim()
+        .to_string();
     if toplevel.is_empty() {
         return None;
     }
@@ -5588,7 +6045,12 @@ fn file_icon(path: &Path) -> &'static str {
     }
 }
 
-fn load_workspace_settings(workspace: &Path) -> (WorkspaceFontSettings, HashMap<PathBuf, WorkspaceFontSettings>) {
+fn load_workspace_settings(
+    workspace: &Path,
+) -> (
+    WorkspaceFontSettings,
+    HashMap<PathBuf, WorkspaceFontSettings>,
+) {
     let mut base = WorkspaceFontSettings {
         size: 13.5,
         family: FontFamilyKind::Monospace,
