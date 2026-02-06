@@ -3,7 +3,7 @@ use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
 
@@ -51,6 +51,24 @@ struct LspWorkerOutput {
     path: PathBuf,
     snapshot: LspSnapshot,
     request: RequestKind,
+}
+
+#[derive(Clone, Debug)]
+enum AsyncCommandTarget {
+    TerminalPrimary,
+    TerminalSecondary,
+    Task,
+    RunConfig,
+}
+
+#[derive(Clone, Debug)]
+struct AsyncCommandResult {
+    target: AsyncCommandTarget,
+    label: String,
+    stdout: String,
+    stderr: String,
+    success: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -329,6 +347,8 @@ pub struct LuxApp {
     show_git_panel: bool,
     git_panel: GitPanelState,
     lsp_rx: Option<Receiver<LspWorkerOutput>>,
+    async_cmd_tx: Sender<AsyncCommandResult>,
+    async_cmd_rx: Receiver<AsyncCommandResult>,
     lsp_last_request: f64,
 }
 
@@ -369,6 +389,7 @@ impl LuxApp {
         }
         let (editors, active_tab) =
             load_session_editors().unwrap_or_else(|| (vec![Editor::new()], 0));
+        let (async_cmd_tx, async_cmd_rx) = mpsc::channel();
         let mut app = Self {
             editors,
             active_tab,
@@ -554,6 +575,8 @@ impl LuxApp {
             show_git_panel: false,
             git_panel: GitPanelState::default(),
             lsp_rx: None,
+            async_cmd_tx,
+            async_cmd_rx,
             lsp_last_request: 0.0,
         };
         app.apply_cli_open_paths();
@@ -1948,43 +1971,19 @@ impl LuxApp {
             self.terminal_log
                 .push(format!("[{}] $ {}", profile.name, command));
         }
-        let output = Command::new(profile.shell)
-            .arg("-lc")
-            .arg(&command)
-            .current_dir(self.workspace_root.clone())
-            .output();
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if !stdout.is_empty() {
-                    if secondary {
-                        self.terminal_log_secondary.push(stdout.clone());
-                    } else {
-                        self.terminal_log.push(stdout.clone());
-                    }
-                    self.push_output_log(stdout);
-                }
-                if !stderr.is_empty() {
-                    if secondary {
-                        self.terminal_log_secondary.push(stderr.clone());
-                    } else {
-                        self.terminal_log.push(stderr.clone());
-                    }
-                    self.push_output_log(stderr);
-                }
-                if self.output_log.len() > 300 {
-                    self.output_log.drain(0..(self.output_log.len() - 300));
-                }
-            }
-            Err(err) => {
-                if secondary {
-                    self.terminal_log_secondary.push(format!("error: {err}"));
-                } else {
-                    self.terminal_log.push(format!("error: {err}"));
-                }
-            }
-        }
+        let target = if secondary {
+            AsyncCommandTarget::TerminalSecondary
+        } else {
+            AsyncCommandTarget::TerminalPrimary
+        };
+        self.spawn_shell_command(
+            target,
+            format!("terminal {}", profile.name),
+            profile.shell,
+            command,
+            self.workspace_root.clone(),
+            Vec::new(),
+        );
         if secondary {
             self.terminal_input_secondary.clear();
         } else {
@@ -2009,28 +2008,15 @@ impl LuxApp {
             self.push_output_log("Task blocked: workspace not trusted".to_string());
             return;
         }
-        let output = Command::new("sh")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(self.workspace_root.clone())
-            .output();
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                if !stdout.trim().is_empty() {
-                    self.push_output_log(stdout);
-                }
-                if !stderr.trim().is_empty() {
-                    self.push_output_log(stderr);
-                }
-                self.push_output_log(format!("Task finished: {}", output.status.success()));
-            }
-            Err(err) => self.push_output_log(format!("Task error: {err}")),
-        }
-        if self.output_log.len() > 500 {
-            self.output_log.drain(0..(self.output_log.len() - 500));
-        }
+        self.push_output_log(format!("Task started: {}", command));
+        self.spawn_shell_command(
+            AsyncCommandTarget::Task,
+            command.to_string(),
+            "sh".to_string(),
+            command.to_string(),
+            self.workspace_root.clone(),
+            Vec::new(),
+        );
     }
 
     fn run_configuration(&mut self, cfg: &RunConfiguration) {
@@ -2038,35 +2024,133 @@ impl LuxApp {
             self.push_output_log("Run config blocked: workspace not trusted".to_string());
             return;
         }
-        let mut cmd = Command::new("sh");
-        cmd.arg("-lc")
-            .arg(&cfg.command)
-            .current_dir(self.workspace_root.clone());
+        let mut env_overrides = Vec::new();
         for pair in cfg.env_overrides.split(';') {
             let pair = pair.trim();
             if pair.is_empty() {
                 continue;
             }
             if let Some((k, v)) = pair.split_once('=') {
-                cmd.env(k.trim(), v.trim());
+                env_overrides.push((k.trim().to_string(), v.trim().to_string()));
             }
         }
-        match cmd.output() {
-            Ok(output) => {
-                self.push_output_log(format!("Run config: {}", cfg.name));
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                if !stdout.trim().is_empty() {
-                    self.push_output_log(stdout);
+        self.push_output_log(format!("Run config started: {}", cfg.name));
+        self.spawn_shell_command(
+            AsyncCommandTarget::RunConfig,
+            cfg.name.clone(),
+            "sh".to_string(),
+            cfg.command.clone(),
+            self.workspace_root.clone(),
+            env_overrides,
+        );
+    }
+
+    fn spawn_shell_command(
+        &self,
+        target: AsyncCommandTarget,
+        label: String,
+        shell: String,
+        command: String,
+        cwd: PathBuf,
+        env_overrides: Vec<(String, String)>,
+    ) {
+        let tx = self.async_cmd_tx.clone();
+        thread::spawn(move || {
+            let mut cmd = Command::new(shell);
+            cmd.arg("-lc").arg(&command).current_dir(cwd);
+            for (k, v) in env_overrides {
+                cmd.env(k, v);
+            }
+            let result = match cmd.output() {
+                Ok(output) => AsyncCommandResult {
+                    target,
+                    label,
+                    stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                    success: output.status.success(),
+                    error: None,
+                },
+                Err(err) => AsyncCommandResult {
+                    target,
+                    label,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    success: false,
+                    error: Some(err.to_string()),
+                },
+            };
+            let _ = tx.send(result);
+        });
+    }
+
+    fn poll_async_command_results(&mut self) {
+        while let Ok(result) = self.async_cmd_rx.try_recv() {
+            let AsyncCommandResult {
+                target,
+                label,
+                stdout,
+                stderr,
+                success,
+                error,
+            } = result;
+            match target {
+                AsyncCommandTarget::TerminalPrimary => {
+                    if !stdout.is_empty() {
+                        self.terminal_log.push(stdout.clone());
+                        self.push_output_log(stdout);
+                    }
+                    if !stderr.is_empty() {
+                        self.terminal_log.push(stderr.clone());
+                        self.push_output_log(stderr);
+                    }
+                    if let Some(err) = error {
+                        self.terminal_log.push(format!("error: {err}"));
+                        self.push_output_log(format!("Terminal error: {err}"));
+                    }
+                    Self::cap_vec(&mut self.terminal_log, 500);
                 }
-                if !stderr.trim().is_empty() {
-                    self.push_output_log(stderr);
+                AsyncCommandTarget::TerminalSecondary => {
+                    if !stdout.is_empty() {
+                        self.terminal_log_secondary.push(stdout.clone());
+                        self.push_output_log(stdout);
+                    }
+                    if !stderr.is_empty() {
+                        self.terminal_log_secondary.push(stderr.clone());
+                        self.push_output_log(stderr);
+                    }
+                    if let Some(err) = error {
+                        self.terminal_log_secondary.push(format!("error: {err}"));
+                        self.push_output_log(format!("Terminal error: {err}"));
+                    }
+                    Self::cap_vec(&mut self.terminal_log_secondary, 500);
+                }
+                AsyncCommandTarget::Task => {
+                    if !stdout.is_empty() {
+                        self.push_output_log(stdout);
+                    }
+                    if !stderr.is_empty() {
+                        self.push_output_log(stderr);
+                    }
+                    if let Some(err) = error {
+                        self.push_output_log(format!("Task error: {err}"));
+                    } else {
+                        self.push_output_log(format!("Task finished: {success} ({label})"));
+                    }
+                }
+                AsyncCommandTarget::RunConfig => {
+                    if !stdout.is_empty() {
+                        self.push_output_log(stdout);
+                    }
+                    if !stderr.is_empty() {
+                        self.push_output_log(stderr);
+                    }
+                    if let Some(err) = error {
+                        self.push_output_log(format!("Run config error: {err}"));
+                    } else {
+                        self.push_output_log(format!("Run config finished: {success} ({label})"));
+                    }
                 }
             }
-            Err(err) => self.push_output_log(format!("Run config error: {err}")),
-        }
-        if self.output_log.len() > 500 {
-            self.output_log.drain(0..(self.output_log.len() - 500));
         }
     }
 
@@ -3133,6 +3217,13 @@ impl LuxApp {
 
     fn push_output_log(&mut self, line: String) {
         self.output_log.push(redact_secrets(&line));
+        Self::cap_vec(&mut self.output_log, 500);
+    }
+
+    fn cap_vec(vec: &mut Vec<String>, max_len: usize) {
+        if vec.len() > max_len {
+            vec.drain(0..(vec.len() - max_len));
+        }
     }
 
     fn log_event(&mut self, module: &str, level: LogLevel, message: &str) {
@@ -4910,6 +5001,7 @@ impl eframe::App for LuxApp {
             self.refresh_git_panel_data(ctx);
         }
         self.refresh_sidebar_files(ctx);
+        self.poll_async_command_results();
 
         // Global shortcuts (handled before UI to avoid conflicts)
         if !self.command_palette.visible {

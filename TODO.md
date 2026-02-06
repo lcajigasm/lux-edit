@@ -5,7 +5,6 @@ Comparativa usada: VS Code, JetBrains (IntelliJ), Cursor y Zed.
 ## Prioridad P0 (bloqueantes para competir con IDEs maduros)
 
 - [ ] Reescribir LSP para sesiones persistentes por workspace/lenguaje (no spawn por request).
-- [ ] Hacer terminal/tareas/configuraciones no bloqueantes (ejecución async + streaming de salida), evitando `Command::output()` en hilo UI.
 - [ ] Implementar depuración real con DAP (breakpoints, step in/out/over, variables y call stack real), reemplazando el call stack simulado.
 - [ ] Añadir tests reales (unitarios + integración) para editor core, LSP parser, búsqueda/reemplazo y operaciones de archivo.
 - [ ] Dividir `src/app.rs` en módulos por dominio (workspace, git, debug, settings, panels) para bajar riesgo de regresión.
