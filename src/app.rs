@@ -78,6 +78,12 @@ struct ExternalChangePrompt {
 }
 
 #[derive(Clone, Debug)]
+struct DeletePrompt {
+    tab_idx: usize,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
 struct RefactorPreview {
     tab_idx: usize,
     title: String,
@@ -214,6 +220,7 @@ pub struct LuxApp {
     pub confirm_close_tab: Option<usize>,
     pub pending_close_others: Option<usize>,
     pending_external_change: Option<ExternalChangePrompt>,
+    pending_delete_confirm: Option<DeletePrompt>,
     pub closed_tabs: Vec<Editor>,
     pub dragging_tab: Option<usize>,
     pub editor_theme: EditorThemeKind,
@@ -242,7 +249,7 @@ pub struct LuxApp {
     recent_workspaces: Vec<PathBuf>,
     file_ops_target: String,
     file_ops_message: String,
-    deleted_file_backup: Option<(PathBuf, Vec<u8>)>,
+    deleted_file_backup: Option<(PathBuf, PathBuf)>,
     debug_breakpoints: HashMap<PathBuf, HashSet<usize>>,
     debug_watch_input: String,
     debug_watches: Vec<String>,
@@ -405,6 +412,7 @@ impl LuxApp {
             confirm_close_tab: None,
             pending_close_others: None,
             pending_external_change: None,
+            pending_delete_confirm: None,
             closed_tabs: Vec::new(),
             dragging_tab: None,
             editor_theme: EditorThemeKind::Monokai,
@@ -1408,53 +1416,93 @@ impl LuxApp {
         };
     }
 
-    fn delete_active_file(&mut self) {
+    fn request_delete_active_file(&mut self) {
         let Some(path) = self.editors[self.active_tab].file_path.clone() else {
             self.file_ops_message = "No active file".to_string();
             return;
         };
-        let backup = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                self.file_ops_message = format!("Delete failed: {err}");
-                return;
+        self.pending_delete_confirm = Some(DeletePrompt {
+            tab_idx: self.active_tab,
+            path,
+        });
+    }
+
+    fn delete_active_file(&mut self, tab_idx: usize, path: &Path) {
+        let trash_path = self.trash_path_for(path);
+        if let Some(parent) = trash_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let moved = match std::fs::rename(path, &trash_path) {
+            Ok(_) => true,
+            Err(_) => {
+                if std::fs::copy(path, &trash_path).is_ok() {
+                    std::fs::remove_file(path).is_ok()
+                } else {
+                    false
+                }
             }
         };
-        self.file_ops_message = match std::fs::remove_file(&path) {
-            Ok(_) => {
-                self.deleted_file_backup = Some((path.clone(), backup));
-                self.sidebar_last_scan = 0.0;
+
+        self.file_ops_message = if moved {
+            self.deleted_file_backup = Some((path.to_path_buf(), trash_path));
+            self.sidebar_last_scan = 0.0;
+            if tab_idx < self.editors.len() {
                 if self.editors.len() > 1 {
-                    self.force_close_tab(self.active_tab);
+                    self.force_close_tab(tab_idx);
                 } else {
                     self.editors[0] = Editor::new();
                     self.active_tab = 0;
                 }
-                "Deleted (Undo available)".to_string()
             }
-            Err(err) => format!("Delete failed: {err}"),
+            "Moved to trash (Undo available)".to_string()
+        } else {
+            "Delete failed: unable to move to trash".to_string()
         };
     }
 
     fn undo_last_deleted_file(&mut self) {
-        let Some((path, contents)) = self.deleted_file_backup.take() else {
+        let Some((path, trash_path)) = self.deleted_file_backup.take() else {
             self.file_ops_message = "Nothing to undo".to_string();
             return;
         };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match std::fs::write(&path, &contents) {
-            Ok(_) => {
-                self.sidebar_last_scan = 0.0;
-                self.file_ops_message = format!("Restored {}", path.to_string_lossy());
-                self.open_path_in_tab(path.as_path());
+        let restored = match std::fs::rename(&trash_path, &path) {
+            Ok(_) => true,
+            Err(_) => {
+                if std::fs::copy(&trash_path, &path).is_ok() {
+                    let _ = std::fs::remove_file(&trash_path);
+                    true
+                } else {
+                    false
+                }
             }
-            Err(err) => {
-                self.file_ops_message = format!("Undo delete failed: {err}");
-                self.deleted_file_backup = Some((path, contents));
-            }
+        };
+        if restored {
+            self.sidebar_last_scan = 0.0;
+            self.file_ops_message = format!("Restored {}", path.to_string_lossy());
+            self.open_path_in_tab(path.as_path());
+        } else {
+            self.file_ops_message = "Undo delete failed".to_string();
+            self.deleted_file_backup = Some((path, trash_path));
         }
+    }
+
+    fn trash_path_for(&self, path: &Path) -> PathBuf {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("deleted-file");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        self.workspace_root
+            .join(".lux")
+            .join("trash")
+            .join(format!("{stamp}-{name}"))
     }
 
     fn sidebar_tab_title(tab: SidebarTab) -> &'static str {
@@ -1621,7 +1669,7 @@ impl LuxApp {
                                 self.rename_or_move_active_file();
                             }
                             if ui.button("Delete Active").clicked() {
-                                self.delete_active_file();
+                                self.request_delete_active_file();
                             }
                             if self.deleted_file_backup.is_some()
                                 && ui.button("Undo Delete").clicked()
@@ -5112,6 +5160,36 @@ impl eframe::App for LuxApp {
                     }
                 }
                 self.pending_external_change = None;
+            }
+        }
+
+        if let Some(prompt) = self.pending_delete_confirm.clone() {
+            let mut confirm_delete = false;
+            let mut cancel_delete = false;
+            egui::Window::new("Confirm Safe Delete")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Move this file to trash?\n{}",
+                        prompt.path.to_string_lossy()
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Move To Trash").clicked() {
+                            confirm_delete = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel_delete = true;
+                        }
+                    });
+                });
+            if confirm_delete {
+                self.delete_active_file(prompt.tab_idx, prompt.path.as_path());
+                self.pending_delete_confirm = None;
+            } else if cancel_delete {
+                self.pending_delete_confirm = None;
             }
         }
 

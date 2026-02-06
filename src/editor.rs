@@ -372,7 +372,7 @@ impl Editor {
 
     pub fn save(&mut self) -> Result<(), std::io::Error> {
         if let Some(path) = &self.file_path {
-            fs::write(path, self.serialized_contents())?;
+            atomic_write_with_backup(path, self.serialized_contents().as_bytes())?;
             self.modified = false;
             Ok(())
         } else {
@@ -384,7 +384,10 @@ impl Editor {
     }
 
     pub fn save_as(&mut self, path: PathBuf) -> Result<(), std::io::Error> {
-        fs::write(&path, self.serialized_contents())?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write_with_backup(&path, self.serialized_contents().as_bytes())?;
         self.title = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1743,6 +1746,46 @@ fn strip_snippet_placeholders(input: &str) -> String {
     out
 }
 
+fn atomic_write_with_backup(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let backup_path = backup_path_for(path);
+    if path.exists() {
+        let _ = fs::copy(path, &backup_path);
+    }
+
+    let tmp_path = temp_path_for(path);
+    fs::write(&tmp_path, data)?;
+    if fs::rename(&tmp_path, path).is_err() {
+        if path.exists() {
+            let _ = fs::remove_file(path);
+        }
+        fs::rename(&tmp_path, path)?;
+    }
+    Ok(())
+}
+
+fn temp_path_for(path: &std::path::Path) -> PathBuf {
+    let mut tmp = path.to_path_buf();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let pid = std::process::id();
+    if ext.is_empty() {
+        tmp.set_extension(format!("lux-tmp-{pid}"));
+    } else {
+        tmp.set_extension(format!("{ext}.lux-tmp-{pid}"));
+    }
+    tmp
+}
+
+fn backup_path_for(path: &std::path::Path) -> PathBuf {
+    let mut backup = path.to_path_buf();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        backup.set_extension("bak");
+    } else {
+        backup.set_extension(format!("{ext}.bak"));
+    }
+    backup
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,5 +1825,22 @@ mod tests {
         editor.set_document_text("alpha beta alpha");
         editor.replace_all("alpha", "gamma");
         assert_eq!(editor.rope.to_string(), "gamma beta gamma");
+    }
+
+    #[test]
+    fn save_creates_backup_and_updates_contents() {
+        let base = std::env::temp_dir().join(format!("lux-editor-save-{}", std::process::id()));
+        let _ = fs::create_dir_all(&base);
+        let path = base.join("sample.txt");
+        fs::write(&path, "old value").unwrap();
+
+        let mut editor = Editor::from_file(path.clone()).unwrap();
+        editor.set_document_text("new value");
+        editor.save().unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "new value");
+        let backup = backup_path_for(&path);
+        assert!(backup.exists());
     }
 }

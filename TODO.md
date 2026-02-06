@@ -60,14 +60,11 @@ Comparativa usada: VS Code, JetBrains (IntelliJ), Cursor y Zed.
 - [ ] Marketplace con firma/verificación de manifiestos y checksum.
 
 ### File Management
-- [ ] Guardado atómico (tmp + rename) y backup en fallos.
-- [ ] “Safe delete” (papelera) + confirmación previa para borrado.
 - [ ] Soporte robusto para archivos grandes y binarios.
 
 ### Search & Navigation
 - [ ] Reemplazo por workspace con preview de diff y confirmación por archivo.
 - [ ] Regex replace real en workspace.
-- [ ] Corregir parsing de paths con `:` (Windows) en search, symbol y output links.
 - [ ] Navegación a símbolo con index por lenguaje (LSP workspace symbols).
 
 ### Refactoring
