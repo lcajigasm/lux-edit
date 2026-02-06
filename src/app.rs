@@ -6371,3 +6371,37 @@ fn redact_secrets(input: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_search_hit_location_handles_windows_style_paths() {
+        let hit = r"C:\repo\src\main.rs:42:let x = 1;";
+        let parsed = parse_search_hit_location(hit).unwrap();
+        assert_eq!(parsed.0, r"C:\repo\src\main.rs");
+        assert_eq!(parsed.1, 42);
+    }
+
+    #[test]
+    fn parse_symbol_location_handles_windows_style_paths() {
+        let symbol = r"C:\repo\src\lib.rs:12: fn run()";
+        let parsed = parse_symbol_location(symbol).unwrap();
+        assert_eq!(parsed.0, PathBuf::from(r"C:\repo\src\lib.rs"));
+        assert_eq!(parsed.1, 12);
+    }
+
+    #[test]
+    fn parse_stacktrace_location_supports_line_col_format() {
+        let base = std::env::temp_dir().join(format!("lux-edit-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&base);
+        let file = base.join("stack.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let line = format!("{}:23:9", file.display());
+        let parsed = parse_stacktrace_location(&line).unwrap();
+        assert_eq!(parsed.0, file);
+        assert_eq!(parsed.1, 23);
+    }
+}

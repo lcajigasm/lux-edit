@@ -1742,3 +1742,45 @@ fn strip_snippet_placeholders(input: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_whole_word_replaces_only_word_boundaries() {
+        let input = "foo food _foo foo_bar foo";
+        let out = replace_whole_word(input, "foo", "bar");
+        assert_eq!(out, "bar food _foo foo_bar bar");
+    }
+
+    #[test]
+    fn strip_snippet_placeholders_keeps_fallback_text() {
+        let input = "fn ${1:name}(${2:args}) { $0 }";
+        let out = strip_snippet_placeholders(input);
+        assert_eq!(out, "fn name(args) {  }");
+    }
+
+    #[test]
+    fn extract_backticked_symbol_parses_symbol_name() {
+        let msg = "cannot find value `MyType` in this scope";
+        assert_eq!(extract_backticked_symbol(msg).as_deref(), Some("MyType"));
+    }
+
+    #[test]
+    fn rename_symbol_in_document_uses_word_boundaries() {
+        let mut editor = Editor::new();
+        editor.set_document_text("foo food foo_bar foo");
+        let ok = editor.rename_symbol_in_document("foo", "bar");
+        assert!(ok);
+        assert_eq!(editor.rope.to_string(), "bar food foo_bar bar");
+    }
+
+    #[test]
+    fn replace_all_updates_entire_document() {
+        let mut editor = Editor::new();
+        editor.set_document_text("alpha beta alpha");
+        editor.replace_all("alpha", "gamma");
+        assert_eq!(editor.rope.to_string(), "gamma beta gamma");
+    }
+}
