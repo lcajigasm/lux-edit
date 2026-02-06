@@ -1,7 +1,11 @@
 use serde_json::{json, Value};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const LSP_PROCESS_TIMEOUT: Duration = Duration::from_millis(2500);
 
 #[derive(Clone, Debug)]
 pub struct CompletionCandidate {
@@ -46,15 +50,7 @@ pub fn collect_snapshot(
     request: RequestKind,
 ) -> Snapshot {
     let Some(server) = resolve_server(path) else {
-        return Snapshot {
-            completions: snippets_for(path),
-            diagnostics: Vec::new(),
-            formatted_text: None,
-            definitions: Vec::new(),
-            references: Vec::new(),
-            implementations: Vec::new(),
-            had_server: false,
-        };
+        return fallback_snapshot(path);
     };
 
     let uri = format!("file://{}", path.to_string_lossy());
@@ -184,17 +180,7 @@ pub fn collect_snapshot(
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => {
-            return Snapshot {
-                completions: snippets_for(path),
-                diagnostics: Vec::new(),
-                formatted_text: None,
-                definitions: Vec::new(),
-                references: Vec::new(),
-                implementations: Vec::new(),
-                had_server: false,
-            }
-        }
+        Err(_) => return fallback_snapshot(path),
     };
 
     if let Some(stdin) = child.stdin.as_mut() {
@@ -202,20 +188,12 @@ pub fn collect_snapshot(
             let _ = write_lsp_message(&mut *stdin, &message);
         }
     }
+    // Finish stdin so servers process all queued requests.
+    drop(child.stdin.take());
 
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(_) => {
-            return Snapshot {
-                completions: snippets_for(path),
-                diagnostics: Vec::new(),
-                formatted_text: None,
-                definitions: Vec::new(),
-                references: Vec::new(),
-                implementations: Vec::new(),
-                had_server: false,
-            }
-        }
+    let stdout = match wait_for_stdout_with_timeout(&mut child, LSP_PROCESS_TIMEOUT) {
+        Some(stdout) => stdout,
+        None => return fallback_snapshot(path),
     };
 
     let mut snapshot = Snapshot {
@@ -228,7 +206,7 @@ pub fn collect_snapshot(
         had_server: true,
     };
 
-    let responses = parse_lsp_stream(&output.stdout);
+    let responses = parse_lsp_stream(&stdout);
     for message in responses {
         if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
             if method == "textDocument/publishDiagnostics" {
@@ -283,6 +261,46 @@ pub fn collect_snapshot(
     }
 
     snapshot
+}
+
+fn fallback_snapshot(path: &Path) -> Snapshot {
+    Snapshot {
+        completions: snippets_for(path),
+        diagnostics: Vec::new(),
+        formatted_text: None,
+        definitions: Vec::new(),
+        references: Vec::new(),
+        implementations: Vec::new(),
+        had_server: false,
+    }
+}
+
+fn wait_for_stdout_with_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    let deadline = Instant::now() + timeout;
+    let mut stdout = child.stdout.take();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let mut bytes = Vec::new();
+                if let Some(mut out) = stdout.take() {
+                    let _ = out.read_to_end(&mut bytes);
+                }
+                return Some(bytes);
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 fn write_lsp_message(mut writer: impl Write, body: &Value) -> std::io::Result<()> {
@@ -380,15 +398,95 @@ fn formatting_from_result(result: Option<&Value>, original: &str) -> Option<Stri
     if edits.is_empty() {
         return None;
     }
-    let first_new_text = edits
-        .first()
-        .and_then(|v| v.get("newText"))
-        .and_then(|v| v.as_str())?;
-    if edits.len() == 1 {
-        return Some(first_new_text.to_string());
+
+    let mut parsed = Vec::new();
+    for edit in edits {
+        let range = edit.get("range")?;
+        let start_line = range
+            .get("start")
+            .and_then(|v| v.get("line"))
+            .and_then(|v| v.as_u64())? as usize;
+        let start_char = range
+            .get("start")
+            .and_then(|v| v.get("character"))
+            .and_then(|v| v.as_u64())? as usize;
+        let end_line = range
+            .get("end")
+            .and_then(|v| v.get("line"))
+            .and_then(|v| v.as_u64())? as usize;
+        let end_char = range
+            .get("end")
+            .and_then(|v| v.get("character"))
+            .and_then(|v| v.as_u64())? as usize;
+        let new_text = edit
+            .get("newText")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let start = lsp_position_to_char_idx(original, start_line, start_char);
+        let end = lsp_position_to_char_idx(original, end_line, end_char);
+        if start > end {
+            return None;
+        }
+        parsed.push((start, end, new_text));
     }
-    // Fallback: if multiple edits arrive, keep original (avoids applying complex ranges incorrectly).
-    Some(original.to_string())
+
+    parsed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let mut formatted = original.to_string();
+    for (start, end, new_text) in parsed {
+        let start_byte = char_to_byte_idx(&formatted, start);
+        let end_byte = char_to_byte_idx(&formatted, end);
+        if start_byte > end_byte || end_byte > formatted.len() {
+            return None;
+        }
+        formatted.replace_range(start_byte..end_byte, &new_text);
+    }
+    if formatted == original {
+        None
+    } else {
+        Some(formatted)
+    }
+}
+
+fn lsp_position_to_char_idx(text: &str, line: usize, character: usize) -> usize {
+    let mut current_line = 0usize;
+    let mut current_char = 0usize;
+    let mut line_start_char = 0usize;
+
+    for ch in text.chars() {
+        if current_line == line {
+            break;
+        }
+        current_char += 1;
+        if ch == '\n' {
+            current_line += 1;
+            line_start_char = current_char;
+        }
+    }
+
+    let target_line = current_line == line;
+    if !target_line {
+        return text.chars().count();
+    }
+
+    let mut line_len = 0usize;
+    for ch in text.chars().skip(line_start_char) {
+        if ch == '\n' {
+            break;
+        }
+        line_len += 1;
+    }
+    line_start_char + character.min(line_len)
+}
+
+fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    match text.char_indices().nth(char_idx) {
+        Some((byte_idx, _)) => byte_idx,
+        None => text.len(),
+    }
 }
 
 fn locations_from_result(result: Option<&Value>) -> Vec<String> {

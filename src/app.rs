@@ -224,6 +224,7 @@ pub struct LuxApp {
     recent_workspaces: Vec<PathBuf>,
     file_ops_target: String,
     file_ops_message: String,
+    deleted_file_backup: Option<(PathBuf, Vec<u8>)>,
     debug_breakpoints: HashMap<PathBuf, HashSet<usize>>,
     debug_watch_input: String,
     debug_watches: Vec<String>,
@@ -411,6 +412,7 @@ impl LuxApp {
             recent_workspaces,
             file_ops_target: String::new(),
             file_ops_message: String::new(),
+            deleted_file_backup: None,
             debug_breakpoints: HashMap::new(),
             debug_watch_input: String::new(),
             debug_watches: Vec::new(),
@@ -994,12 +996,12 @@ impl LuxApp {
         self.sidebar_last_scan = now;
         let output = Command::new("rg")
             .arg("--files")
-            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .current_dir(self.workspace_root.clone())
             .output();
         let mut files = Vec::new();
         if let Ok(output) = output {
             if output.status.success() {
-                for line in String::from_utf8_lossy(&output.stdout).lines().take(400) {
+                for line in String::from_utf8_lossy(&output.stdout).lines() {
                     files.push(PathBuf::from(line));
                 }
             }
@@ -1038,7 +1040,7 @@ impl LuxApp {
         }
         let output = cmd
             .arg(query)
-            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .current_dir(self.workspace_root.clone())
             .output();
         if let Ok(output) = output {
             if output.status.success() {
@@ -1052,16 +1054,13 @@ impl LuxApp {
     }
 
     fn update_search_preview(&mut self, hit: &str) {
-        let Some((path, rest)) = hit.split_once(':') else {
+        let Some((path, line_num)) = parse_search_hit_location(hit) else {
             self.sidebar_search_preview.clear();
             return;
         };
-        let Some((line_str, _)) = rest.split_once(':') else {
-            self.sidebar_search_preview.clear();
-            return;
-        };
-        let line_num = line_str.parse::<usize>().unwrap_or(1).saturating_sub(1);
-        let Ok(content) = std::fs::read_to_string(path) else {
+        let line_num = line_num.saturating_sub(1);
+        let full_path = self.workspace_join(&path);
+        let Ok(content) = std::fs::read_to_string(full_path) else {
             self.sidebar_search_preview = "Preview unavailable".to_string();
             return;
         };
@@ -1088,15 +1087,20 @@ impl LuxApp {
             return;
         }
         let mut changed_files = 0usize;
+        let mut visited_paths = HashSet::new();
         for hit in self.sidebar_search_results.clone() {
-            if let Some((path, _)) = hit.split_once(':') {
-                let full_path = PathBuf::from(path);
-                if let Ok(content) = std::fs::read_to_string(&full_path) {
-                    if content.contains(&find) {
-                        let replaced = content.replace(&find, &replace);
-                        if replaced != content && std::fs::write(&full_path, replaced).is_ok() {
-                            changed_files += 1;
-                        }
+            let Some((path, _line)) = parse_search_hit_location(&hit) else {
+                continue;
+            };
+            let full_path = self.workspace_join(&path);
+            if !visited_paths.insert(full_path.clone()) {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                if content.contains(&find) {
+                    let replaced = content.replace(&find, &replace);
+                    if replaced != content && std::fs::write(&full_path, replaced).is_ok() {
+                        changed_files += 1;
                     }
                 }
             }
@@ -1386,13 +1390,48 @@ impl LuxApp {
             self.file_ops_message = "No active file".to_string();
             return;
         };
-        self.file_ops_message = match std::fs::remove_file(path) {
+        let backup = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                self.file_ops_message = format!("Delete failed: {err}");
+                return;
+            }
+        };
+        self.file_ops_message = match std::fs::remove_file(&path) {
             Ok(_) => {
+                self.deleted_file_backup = Some((path.clone(), backup));
                 self.sidebar_last_scan = 0.0;
-                "Deleted".to_string()
+                if self.editors.len() > 1 {
+                    self.force_close_tab(self.active_tab);
+                } else {
+                    self.editors[0] = Editor::new();
+                    self.active_tab = 0;
+                }
+                "Deleted (Undo available)".to_string()
             }
             Err(err) => format!("Delete failed: {err}"),
         };
+    }
+
+    fn undo_last_deleted_file(&mut self) {
+        let Some((path, contents)) = self.deleted_file_backup.take() else {
+            self.file_ops_message = "Nothing to undo".to_string();
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&path, &contents) {
+            Ok(_) => {
+                self.sidebar_last_scan = 0.0;
+                self.file_ops_message = format!("Restored {}", path.to_string_lossy());
+                self.open_path_in_tab(path.as_path());
+            }
+            Err(err) => {
+                self.file_ops_message = format!("Undo delete failed: {err}");
+                self.deleted_file_backup = Some((path, contents));
+            }
+        }
     }
 
     fn sidebar_tab_title(tab: SidebarTab) -> &'static str {
@@ -1561,6 +1600,11 @@ impl LuxApp {
                             if ui.button("Delete Active").clicked() {
                                 self.delete_active_file();
                             }
+                            if self.deleted_file_backup.is_some()
+                                && ui.button("Undo Delete").clicked()
+                            {
+                                self.undo_last_deleted_file();
+                            }
                         });
                         if !self.file_ops_message.is_empty() {
                             ui.label(self.file_ops_message.clone());
@@ -1625,8 +1669,9 @@ impl LuxApp {
                                 if ui.selectable_label(selected, &hit).clicked() {
                                     self.sidebar_search_selected = Some(hit.clone());
                                     self.update_search_preview(&hit);
-                                    if let Some((path, _)) = hit.split_once(':') {
-                                        self.open_path_in_tab(Path::new(path));
+                                    if let Some((path, _line)) = parse_search_hit_location(&hit) {
+                                        let full_path = self.workspace_join(&path);
+                                        self.open_path_in_tab(full_path.as_path());
                                     }
                                 }
                             }
@@ -1658,15 +1703,9 @@ impl LuxApp {
                             .show(ui, |ui| {
                                 for symbol in self.sidebar_symbol_results.clone() {
                                     if ui.selectable_label(false, &symbol).clicked() {
-                                        if let Some((path, rest)) = symbol.split_once(':') {
-                                            self.open_path_in_tab(Path::new(path));
-                                            if let Some((line_str, _)) =
-                                                rest.trim_start().split_once(':')
-                                            {
-                                                if let Ok(line) = line_str.trim().parse::<usize>() {
-                                                    self.active_editor().goto_line(line);
-                                                }
-                                            }
+                                        if let Some((path, line)) = parse_symbol_location(&symbol) {
+                                            self.open_path_in_tab(path.as_path());
+                                            self.active_editor().goto_line(line);
                                         }
                                     }
                                 }
@@ -1912,7 +1951,7 @@ impl LuxApp {
         let output = Command::new(profile.shell)
             .arg("-lc")
             .arg(&command)
-            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .current_dir(self.workspace_root.clone())
             .output();
         match output {
             Ok(output) => {
@@ -6161,19 +6200,66 @@ fn build_simple_diff_preview(before: &str, after: &str) -> String {
 }
 
 fn parse_stacktrace_location(line: &str) -> Option<(PathBuf, usize)> {
-    let mut parts = line.split(':').collect::<Vec<_>>();
-    if parts.len() < 2 {
-        return None;
+    let trimmed = line.trim();
+    let (head, tail) = trimmed.rsplit_once(':')?;
+    let last_num = tail.trim().parse::<usize>().ok()?;
+
+    if let Some((path_part, line_part)) = head.rsplit_once(':') {
+        if let Ok(line_no) = line_part.trim().parse::<usize>() {
+            let candidate = PathBuf::from(path_part.trim());
+            if candidate.exists() {
+                return Some((candidate, line_no));
+            }
+        }
     }
-    let line_part = parts.pop()?.trim();
-    let line_no = line_part.parse::<usize>().ok()?;
-    let path = parts.join(":");
-    let candidate = PathBuf::from(path.trim());
+
+    let candidate = PathBuf::from(head.trim());
     if candidate.exists() {
-        Some((candidate, line_no))
-    } else {
-        None
+        return Some((candidate, last_num));
     }
+    None
+}
+
+fn parse_search_hit_location(hit: &str) -> Option<(String, usize)> {
+    let trimmed = hit.trim();
+    let mut start = 0usize;
+    while start < trimmed.len() {
+        let first = start + trimmed[start..].find(':')?;
+        let after_first = first + 1;
+        let Some(next_rel) = trimmed[after_first..].find(':') else {
+            break;
+        };
+        let second = after_first + next_rel;
+        if let Ok(line) = trimmed[after_first..second].trim().parse::<usize>() {
+            let path = trimmed[..first].trim();
+            if !path.is_empty() {
+                return Some((path.to_string(), line));
+            }
+        }
+        start = after_first;
+    }
+    None
+}
+
+fn parse_symbol_location(symbol: &str) -> Option<(PathBuf, usize)> {
+    let trimmed = symbol.trim();
+    let mut start = 0usize;
+    while start < trimmed.len() {
+        let first = start + trimmed[start..].find(':')?;
+        let after_first = first + 1;
+        let Some(next_rel) = trimmed[after_first..].find(':') else {
+            break;
+        };
+        let second = after_first + next_rel;
+        if let Ok(line) = trimmed[after_first..second].trim().parse::<usize>() {
+            let path = trimmed[..first].trim();
+            if !path.is_empty() {
+                return Some((PathBuf::from(path), line));
+            }
+        }
+        start = after_first;
+    }
+    None
 }
 
 fn now_secs() -> f64 {
