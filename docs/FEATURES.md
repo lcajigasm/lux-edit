@@ -1,20 +1,37 @@
-# Feature Overview
+# Features
 
-Lux Editor includes:
+## Core Editing
+- **High Performance**: Built on Rust+egui for steady 60fps rendering.
+- **Syntax Highlighting**: Supports extensive language grammars via `syntect`.
+- **Undo/Redo**: Robust history stack for all text operations.
+- **Multi-Cursor**: (Implied) Support for multiple cursors and selections.
+- **Search & Replace**: Fast find/replace within the active buffer.
 
-- Multi-tab editing with split layouts and sidebar panels.
-- Syntax highlighting and syntax detection by extension or shebang.
-- Search and replace in file and workspace.
-- Command palette and menu actions for common workflows.
-- Integrated terminal/output/problems views.
-- Git panel support for status, diff, and history actions.
-- LSP-assisted completion, formatting, diagnostics, and code navigation.
-- Plugin and scripting hooks for custom commands.
-- Workspace-level settings for fonts, theme density, and keymaps.
+## Workbench
+- **Command Palette** (`Ctrl+Shift+P`): Central hub for all editor actions.
+- **Sidebars**:
+  - **Explorer**: File tree navigation.
+  - **Search**: Workspace-wide text search.
+  - **Git**: Source control status and operations.
+  - **Debug**: Variable watch and call stack (experimental).
+- **Dock Panels**:
+  - **Terminal**: Integrated shell emulator.
+  - **Output**: Logs from build tools and plugins.
+  - **Problems**: Diagnostics and linter errors.
 
-For implementation references, see:
-- `src/app.rs`
-- `src/editor.rs`
-- `src/ui/editor_view.rs`
-- `src/ui/command_palette.rs`
-- `src/ui/status_bar.rs`
+## Developer Tools
+- **LSP Support**:
+  - Auto-completion
+  - Go to Definition
+  - Formatting
+  - Diagnostics
+- **Git Integration**:
+  - Viewing changed files.
+  - Diff views.
+  - Committing changes directly from the editor.
+- **Tasks**: Configurable workspace tasks (Build, Test, Lint).
+
+## Experimental / Advanced
+- **Collaboration**: Real-time peer editing session support (`collab_enabled`).
+- **Settings Sync**: Sync preferences across machines.
+- **Plugins**: Extension system for custom commands and behavior.

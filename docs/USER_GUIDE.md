@@ -1,31 +1,42 @@
 # User Guide
 
-## Open and Edit
+## Interface Modes
 
-1. Start the app.
-2. Use `File -> Open` or `Cmd/Ctrl+O` to open a file.
-3. Edit content and save with `Cmd/Ctrl+S`.
+- **Zen Mode**: Hides all sidebars and panels for distraction-free coding.
+- **Focus Mode**: Highlights the active line/block to help focus on current context.
 
 ## Navigation
 
-- `Cmd/Ctrl+P`: quick file lookup.
-- `Cmd/Ctrl+Shift+P`: command palette.
-- `Cmd/Ctrl+F`: find.
-- `Cmd/Ctrl+H`: replace.
-- `Cmd/Ctrl+G`: go to line.
+- **Quick Open** (`Ctrl+P`): Quickly jump to files by name.
+- **Go To Line** (`Ctrl+G`): Navigate to specific line numbers.
+- **Symbol Search**: Jump to functions/classes within the file.
 
-## Panels
+## Command Palette (`Ctrl+Shift+P`)
 
-- Left sidebar: Explorer/Search/Git/Debug views.
-- Bottom panel: Terminal/Output/Problems.
-- Status bar: active language, diagnostics, and editor state.
+The Command Palette is the control center. Commands are grouped by category:
 
-## Git and LSP
+- **File**: New Tab, Open, Save, Close.
+- **Edit**: Undo, Redo, Format Document.
+- **Selection**: Select All.
+- **Navigation**: Go to Line.
+- **Find**: Find/Replace actions.
+- **Extensions**: Git commands, Tasks, Debugging.
 
-- Use the Git panel to inspect changes and perform basic actions.
-- LSP features are available per file language when enabled.
+## Keyboard Shortcuts
 
-## Tips
+| Action | Windows/Linux | macOS |
+|--------|---------------|-------|
+| **New Tab** | `Ctrl+N` | `Cmd+N` |
+| **Open File** | `Ctrl+O` | `Cmd+O` |
+| **Save File** | `Ctrl+S` | `Cmd+S` |
+| **Save As** | `Ctrl+Shift+S` | `Cmd+Shift+S` |
+| **Close Tab** | `Ctrl+W` | `Cmd+W` |
+| **Find** | `Ctrl+F` | `Cmd+F` |
+| **Go To Line** | `Ctrl+G` | `Cmd+G` |
+| **Command Palette** | `Ctrl+Shift+P` | `Cmd+Shift+P` |
+| **Undo** | `Ctrl+Z` | `Cmd+Z` |
+| **Redo** | `Ctrl+Shift+Z` | `Cmd+Shift+Z` |
+| **Select All** | `Ctrl+A` | `Cmd+A` |
+| **Format Document** | `Ctrl+Shift+F` | `Cmd+Shift+F` |
 
-- Use workspace settings for font size/family and ligatures.
-- Import external settings from the Platform menu when available.
+> **Note**: Shortcuts can be customized in the configuration.

@@ -2,28 +2,36 @@
 
 ## Requirements
 
-- Rust stable toolchain.
+- **Rust**: Stable toolchain (install via [rustup.rs](https://rustup.rs)).
 
 ## Build and Run
 
 ```bash
+# Debug build (faster compile)
 cargo run
+
+# Release build (optimized)
+cargo run --release
 ```
 
-## Validate
+## Testing
 
 ```bash
-cargo check
+# Run all unit tests
 cargo test
+
+# Run specific test
+cargo test test_name
 ```
 
-## Release and CI
+## Scripts
 
-- CI workflow: `.github/workflows/ci.yml`
-- Release workflow: `.github/workflows/release.yml`
-- Changelog helper: `scripts/changelog.sh`
+Helper scripts are located in `scripts/`:
 
-## Contributing Notes
+- `changelog.sh`: Helper for generating changelogs.
 
-- Prefer focused changes with `cargo check` before opening PRs.
-- Keep docs under `/docs` updated when features or behavior changes.
+## Release Process
+
+1. Automated CI ensures builds pass on PRs.
+2. Releases are handled via GitHub Actions (`.github/workflows/release.yml`).
+3. Ensure documentation under `docs/` is updated before tagging a release.
