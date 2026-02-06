@@ -6,15 +6,30 @@ on:
       channel:
         description: "stable | beta | nightly"
         required: true
-        default: nightly
+        default: beta
+      version:
+        description: "release version (e.g., 0.0.1)"
+        required: true
+        default: "0.0.1"
   schedule:
     - cron: "0 3 * * *"
 
 jobs:
   release:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux
+          - os: windows-latest
+            label: windows
+          - os: macos-latest
+            label: macos
+    runs-on: ${{ matrix.os }}
     env:
       CHANNEL: ${{ github.event.inputs.channel || 'nightly' }}
+      VERSION: ${{ github.event.inputs.version || '0.0.1' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -25,7 +40,7 @@ jobs:
           git fetch --tags --force
           bash scripts/changelog.sh > CHANGELOG.auto.md
       - name: macOS notarization placeholder
-        if: env.CHANNEL == 'stable'
+        if: env.CHANNEL == 'stable' && matrix.label == 'macos'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -33,7 +48,7 @@ jobs:
         run: |
           echo "Notarization step configured via secrets (placeholder command)."
       - name: Windows code signing placeholder
-        if: env.CHANNEL == 'stable'
+        if: env.CHANNEL == 'stable' && matrix.label == 'windows'
         env:
           WINDOWS_CERT_B64: ${{ secrets.WINDOWS_CERT_B64 }}
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
@@ -42,8 +57,7 @@ jobs:
       - name: Upload release channel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lux-edit-${{ env.CHANNEL }}
+          name: lux-edit-${{ env.CHANNEL }}-v${{ env.VERSION }}-${{ matrix.label }}
           path: |
             target/release/lux-edit*
             CHANGELOG.auto.md
-

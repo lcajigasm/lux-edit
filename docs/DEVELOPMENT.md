@@ -33,5 +33,8 @@ Helper scripts are located in `scripts/`:
 ## Release Process
 
 1. Automated CI ensures builds pass on PRs.
-2. Releases are handled via GitHub Actions (`.github/workflows/release.yml`).
-3. Ensure documentation under `docs/` is updated before tagging a release.
+2. Releases are handled via GitHub Actions (`.github/workflows/release.yml`) and publish artifacts for Linux, Windows, and macOS.
+3. For a beta release `0.0.1`, run the workflow manually with:
+   - `channel = beta`
+   - `version = 0.0.1`
+4. Ensure documentation under `docs/` is updated before tagging a release.
