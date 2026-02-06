@@ -46,6 +46,41 @@ pub struct DiffHunk {
     pub kind: DiffKind,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct InlineBlameEntry {
+    pub commit_short: String,
+    pub author: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeLensMetric {
+    pub line: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletionItem {
+    pub label: String,
+    pub insert_text: String,
+    pub detail: String,
+    pub is_snippet: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiagnosticItem {
+    pub line: usize,
+    pub severity: u8,
+    pub message: String,
+}
+
+#[derive(Clone, Debug)]
+enum MacroAction {
+    InsertText(String),
+    Backspace,
+    DeleteForward,
+}
+
 #[derive(Clone, Debug)]
 pub struct Cursor {
     pub pos: Position,
@@ -126,6 +161,27 @@ pub struct Editor {
     pub indent_width: usize,
     pub line_ending: LineEnding,
     pub encoding: TextEncoding,
+    pub inline_blame: Vec<InlineBlameEntry>,
+    pub inline_blame_last_check: f64,
+    pub code_lens_metrics: Vec<CodeLensMetric>,
+    pub completion_items: Vec<CompletionItem>,
+    pub completion_visible: bool,
+    pub diagnostics: Vec<DiagnosticItem>,
+    pub lsp_status: String,
+    pub lsp_last_check: f64,
+    pub request_completion: bool,
+    pub request_formatting: bool,
+    pub request_definition: bool,
+    pub request_references: bool,
+    pub request_implementations: bool,
+    pub lsp_nav_results: Vec<String>,
+    pub code_actions: Vec<String>,
+    pub background_tasks: usize,
+    pub notification_badges: usize,
+    pub macro_recording: bool,
+    pub has_macro: bool,
+    macro_playing: bool,
+    macro_actions: Vec<MacroAction>,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Timestamp of last edit/keystroke (seconds since epoch via std::time)
@@ -224,6 +280,27 @@ impl Editor {
             indent_width: 4,
             line_ending: LineEnding::Lf,
             encoding: TextEncoding::Utf8,
+            inline_blame: Vec::new(),
+            inline_blame_last_check: 0.0,
+            code_lens_metrics: Vec::new(),
+            completion_items: Vec::new(),
+            completion_visible: false,
+            diagnostics: Vec::new(),
+            lsp_status: "LSP: idle".to_string(),
+            lsp_last_check: 0.0,
+            request_completion: false,
+            request_formatting: false,
+            request_definition: false,
+            request_references: false,
+            request_implementations: false,
+            lsp_nav_results: Vec::new(),
+            code_actions: Vec::new(),
+            background_tasks: 0,
+            notification_badges: 0,
+            macro_recording: false,
+            has_macro: false,
+            macro_playing: false,
+            macro_actions: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit_time: 0.0,
@@ -269,6 +346,27 @@ impl Editor {
             indent_width,
             line_ending,
             encoding,
+            inline_blame: Vec::new(),
+            inline_blame_last_check: 0.0,
+            code_lens_metrics: Vec::new(),
+            completion_items: Vec::new(),
+            completion_visible: false,
+            diagnostics: Vec::new(),
+            lsp_status: "LSP: idle".to_string(),
+            lsp_last_check: 0.0,
+            request_completion: false,
+            request_formatting: false,
+            request_definition: false,
+            request_references: false,
+            request_implementations: false,
+            lsp_nav_results: Vec::new(),
+            code_actions: Vec::new(),
+            background_tasks: 0,
+            notification_badges: 0,
+            macro_recording: false,
+            has_macro: false,
+            macro_playing: false,
+            macro_actions: Vec::new(),
         })
     }
 
@@ -412,7 +510,89 @@ impl Editor {
         }
     }
 
+    fn record_macro_action(&mut self, action: MacroAction) {
+        if self.macro_recording && !self.macro_playing {
+            self.macro_actions.push(action);
+            self.has_macro = !self.macro_actions.is_empty();
+        }
+    }
+
+    pub fn toggle_macro_recording(&mut self) {
+        if self.macro_recording {
+            self.macro_recording = false;
+            self.has_macro = !self.macro_actions.is_empty();
+            return;
+        }
+        self.macro_actions.clear();
+        self.has_macro = false;
+        self.macro_recording = true;
+    }
+
+    pub fn play_last_macro(&mut self) {
+        if self.macro_actions.is_empty() || self.macro_playing {
+            return;
+        }
+        self.macro_playing = true;
+        let actions = self.macro_actions.clone();
+        for action in actions {
+            match action {
+                MacroAction::InsertText(text) => self.insert_text(&text),
+                MacroAction::Backspace => self.backspace(),
+                MacroAction::DeleteForward => self.delete_forward(),
+            }
+        }
+        self.macro_playing = false;
+    }
+
+    pub fn add_column_cursors_from_selection(&mut self) {
+        if self.cursors.is_empty() {
+            return;
+        }
+        let Some((start, end)) = self.cursors[0].selection_ordered() else {
+            return;
+        };
+        if start.line == end.line {
+            return;
+        }
+
+        let target_col = end.col;
+        let mut cursors = Vec::new();
+        for line in start.line..=end.line {
+            let max_col = line_len_chars(&self.rope, line);
+            let col = target_col.min(max_col);
+            cursors.push(Cursor::new(line, col));
+        }
+        if !cursors.is_empty() {
+            self.cursors = cursors;
+        }
+    }
+
+    pub fn apply_completion(&mut self, idx: usize) {
+        let Some(item) = self.completion_items.get(idx).cloned() else {
+            return;
+        };
+        self.insert_text(&strip_snippet_placeholders(&item.insert_text));
+        self.completion_visible = false;
+    }
+
+    pub fn set_document_text(&mut self, text: &str) {
+        self.save_undo();
+        self.rope = Rope::from_str(text);
+        self.modified = true;
+        self.completion_visible = false;
+        self.mark_edit();
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        for cursor in &mut self.cursors {
+            cursor.pos.line = cursor.pos.line.min(max_line);
+            let ll = line_len_chars(&self.rope, cursor.pos.line);
+            cursor.pos.col = cursor.pos.col.min(ll);
+            cursor.desired_col = cursor.pos.col;
+            cursor.anchor = None;
+        }
+    }
+
     pub fn insert_text(&mut self, text: &str) {
+        self.record_macro_action(MacroAction::InsertText(text.to_string()));
         self.save_undo();
         let order = self.sorted_cursor_indices_rev();
         for &idx in &order {
@@ -431,9 +611,11 @@ impl Editor {
             self.cursors[idx].desired_col = self.cursors[idx].pos.col;
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     pub fn backspace(&mut self) {
+        self.record_macro_action(MacroAction::Backspace);
         self.save_undo();
         let order = self.sorted_cursor_indices_rev();
         for &idx in &order {
@@ -459,9 +641,11 @@ impl Editor {
             self.cursors[idx].desired_col = self.cursors[idx].pos.col;
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     pub fn delete_forward(&mut self) {
+        self.record_macro_action(MacroAction::DeleteForward);
         self.save_undo();
         let order = self.sorted_cursor_indices_rev();
         for &idx in &order {
@@ -475,6 +659,7 @@ impl Editor {
             self.rope.remove(ci..ci + 1);
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     pub fn insert_newline(&mut self) {
@@ -801,6 +986,7 @@ impl Editor {
             self.cursors[idx].desired_col = self.cursors[idx].pos.col;
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     pub fn delete_word_forward(&mut self) {
@@ -834,6 +1020,7 @@ impl Editor {
             }
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     // --- Multi-cursor ---
@@ -1016,6 +1203,256 @@ impl Editor {
         }
     }
 
+    pub fn symbol_at_primary_cursor(&self) -> String {
+        if self.cursors.is_empty() {
+            return String::new();
+        }
+        self.word_at_cursor(&self.cursors[0])
+    }
+
+    pub fn rename_symbol_in_document(&mut self, from: &str, to: &str) -> bool {
+        if from.is_empty() || to.is_empty() || from == to {
+            return false;
+        }
+        let original = self.rope.to_string();
+        let replaced = replace_whole_word(&original, from, to);
+        if replaced == original {
+            return false;
+        }
+        self.set_document_text(&replaced);
+        true
+    }
+
+    pub fn extract_variable(&mut self, name: &str) -> bool {
+        let var_name = name.trim();
+        if var_name.is_empty() || self.cursors.is_empty() {
+            return false;
+        }
+        let Some((start, end)) = self.cursors[0].selection_ordered() else {
+            return false;
+        };
+        let selected = self.selected_text();
+        if selected.trim().is_empty() {
+            return false;
+        }
+
+        let mut content = self.rope.to_string();
+        let start_ci = pos_to_char_idx(&self.rope, &start);
+        let end_ci = pos_to_char_idx(&self.rope, &end);
+        if start_ci >= end_ci || end_ci > content.len() {
+            return false;
+        }
+
+        let line_start_ci = self.rope.line_to_char(start.line);
+        let line_prefix = content[line_start_ci..start_ci].to_string();
+        let indent: String = line_prefix
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect();
+        let declaration = format!("{indent}let {var_name} = {};\n", selected.trim());
+        content.insert_str(line_start_ci, &declaration);
+
+        let shift = declaration.chars().count();
+        let new_start = start_ci + shift;
+        let new_end = end_ci + shift;
+        content.replace_range(new_start..new_end, var_name);
+        self.set_document_text(&content);
+        true
+    }
+
+    pub fn extract_method(&mut self, name: &str) -> bool {
+        let method_name = name.trim();
+        if method_name.is_empty() || self.cursors.is_empty() {
+            return false;
+        }
+        let Some((start, end)) = self.cursors[0].selection_ordered() else {
+            return false;
+        };
+        let selected = self.selected_text();
+        if selected.trim().is_empty() {
+            return false;
+        }
+        let mut content = self.rope.to_string();
+        let start_ci = pos_to_char_idx(&self.rope, &start);
+        let end_ci = pos_to_char_idx(&self.rope, &end);
+        if start_ci >= end_ci || end_ci > content.len() {
+            return false;
+        }
+
+        content.replace_range(start_ci..end_ci, &format!("{method_name}();"));
+        let extracted_body = selected
+            .lines()
+            .map(|line| format!("    {}", line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        content.push_str(&format!(
+            "\n\nfn {method_name}() {{\n{extracted_body}\n}}\n"
+        ));
+        self.set_document_text(&content);
+        true
+    }
+
+    pub fn inline_variable_at_cursor(&mut self) -> bool {
+        if self.cursors.is_empty() {
+            return false;
+        }
+        let line_idx = self.cursors[0].pos.line;
+        let line = self.line_text(line_idx);
+        let trimmed = line.trim();
+        if !trimmed.starts_with("let ") || !trimmed.ends_with(';') || !trimmed.contains('=') {
+            return false;
+        }
+        let after_let = trimmed.trim_start_matches("let ").trim();
+        let Some((name_part, expr_part)) = after_let.split_once('=') else {
+            return false;
+        };
+        let name = name_part.trim();
+        let expr = expr_part.trim().trim_end_matches(';').trim();
+        if name.is_empty() || expr.is_empty() {
+            return false;
+        }
+
+        let mut content = self.rope.to_string();
+        let line_start = self.rope.line_to_char(line_idx);
+        let line_end = if line_idx + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line_idx + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        if line_end > line_start && line_end <= content.len() {
+            content.replace_range(line_start..line_end, "");
+        }
+        let replaced = replace_whole_word(&content, name, expr);
+        self.set_document_text(&replaced);
+        true
+    }
+
+    pub fn organize_imports(&mut self) -> bool {
+        let path = self.file_path.as_deref();
+        let mut lines: Vec<String> = self.rope.to_string().lines().map(|s| s.to_string()).collect();
+        if lines.is_empty() {
+            return false;
+        }
+
+        let is_import = |line: &str| {
+            let t = line.trim();
+            if let Some(ext) = path.and_then(|p| p.extension()).and_then(|e| e.to_str()) {
+                match ext {
+                    "rs" => t.starts_with("use "),
+                    "py" => t.starts_with("import ") || t.starts_with("from "),
+                    "js" | "jsx" | "ts" | "tsx" => t.starts_with("import "),
+                    _ => t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from "),
+                }
+            } else {
+                t.starts_with("use ") || t.starts_with("import ") || t.starts_with("from ")
+            }
+        };
+
+        let mut import_indices = Vec::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if is_import(line) {
+                import_indices.push(idx);
+            } else if !line.trim().is_empty() && !line.trim_start().starts_with("//") {
+                break;
+            }
+        }
+        if import_indices.is_empty() {
+            return false;
+        }
+
+        let mut imports: Vec<String> = import_indices
+            .iter()
+            .map(|i| lines[*i].trim().to_string())
+            .collect();
+        imports.sort();
+        imports.dedup();
+
+        let start = *import_indices.first().unwrap_or(&0);
+        let end = *import_indices.last().unwrap_or(&0);
+        lines.splice(start..=end, imports);
+        let new_content = lines.join("\n") + "\n";
+        if new_content == self.rope.to_string() {
+            return false;
+        }
+        self.set_document_text(&new_content);
+        true
+    }
+
+    pub fn refresh_code_actions(&mut self) {
+        let mut actions = Vec::new();
+        if !self.diagnostics.is_empty() {
+            actions.push("Quick Fix: Organize imports".to_string());
+        }
+        for diag in &self.diagnostics {
+            let msg = diag.message.to_lowercase();
+            if msg.contains("cannot find") || msg.contains("undeclared") || msg.contains("not found")
+            {
+                if let Some(symbol) = extract_backticked_symbol(&diag.message) {
+                    actions.push(format!("Auto Import: {}", symbol));
+                }
+            }
+            if msg.contains("unused") {
+                actions.push("Quick Fix: Remove current line".to_string());
+            }
+        }
+        actions.sort();
+        actions.dedup();
+        self.code_actions = actions;
+    }
+
+    pub fn apply_code_action(&mut self, action: &str) -> bool {
+        if action == "Quick Fix: Organize imports" {
+            return self.organize_imports();
+        }
+        if action == "Quick Fix: Remove current line" {
+            return self.remove_current_line();
+        }
+        if let Some(symbol) = action.strip_prefix("Auto Import: ") {
+            return self.add_import_suggestion(symbol.trim());
+        }
+        false
+    }
+
+    fn remove_current_line(&mut self) -> bool {
+        if self.cursors.is_empty() {
+            return false;
+        }
+        let line_idx = self.cursors[0].pos.line;
+        let mut content = self.rope.to_string();
+        let start = self.rope.line_to_char(line_idx);
+        let end = if line_idx + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line_idx + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        if start >= end || end > content.len() {
+            return false;
+        }
+        content.replace_range(start..end, "");
+        self.set_document_text(&content);
+        true
+    }
+
+    fn add_import_suggestion(&mut self, symbol: &str) -> bool {
+        if symbol.is_empty() {
+            return false;
+        }
+        let mut content = self.rope.to_string();
+        let import_line = format!("use crate::{};\n", symbol.to_lowercase());
+        if content.contains(&import_line) {
+            return false;
+        }
+        let insert_at = content
+            .lines()
+            .take_while(|line| line.trim().starts_with("use ") || line.trim().is_empty())
+            .map(|line| line.len() + 1)
+            .sum::<usize>();
+        let insert_at = insert_at.min(content.len());
+        content.insert_str(insert_at, &import_line);
+        self.set_document_text(&content);
+        true
+    }
+
     /// Copy: returns selected text (or current line if no selection).
     pub fn copy_text(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -1046,6 +1483,7 @@ impl Editor {
                 self.delete_selection_at(idx);
             }
             self.modified = true;
+            self.mark_edit();
         } else {
             // Delete entire current line
             let line = self.cursors[0].pos.line;
@@ -1064,6 +1502,7 @@ impl Editor {
             self.cursors[0].anchor = None;
             self.cursors[0].desired_col = 0;
             self.modified = true;
+            self.mark_edit();
         }
         text
     }
@@ -1157,6 +1596,7 @@ impl Editor {
             self.cursors[0].pos.col += replace.chars().count();
             self.cursors[0].desired_col = self.cursors[0].pos.col;
             self.modified = true;
+            self.mark_edit();
         }
         // Find next occurrence
         self.find_and_select(find);
@@ -1180,6 +1620,7 @@ impl Editor {
             cursor.anchor = None;
         }
         self.modified = true;
+        self.mark_edit();
     }
 
     // --- Go to line ---
@@ -1196,6 +1637,57 @@ impl Editor {
     }
 }
 
+impl Editor {
+    fn mark_edit(&mut self) {
+        self.last_edit_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+    }
+}
+
+fn replace_whole_word(input: &str, from: &str, to: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let needle: Vec<char> = from.chars().collect();
+    if needle.is_empty() {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let can_match = i + needle.len() <= chars.len()
+            && chars[i..i + needle.len()] == needle[..];
+        if can_match {
+            let prev_ok = i == 0 || !is_word_char(chars[i - 1]);
+            let next_ok = i + needle.len() >= chars.len() || !is_word_char(chars[i + needle.len()]);
+            if prev_ok && next_ok {
+                out.push_str(to);
+                i += needle.len();
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn extract_backticked_symbol(input: &str) -> Option<String> {
+    let start = input.find('`')?;
+    let rest = &input[start + 1..];
+    let end = rest.find('`')?;
+    let symbol = rest[..end].trim();
+    if symbol.is_empty() {
+        None
+    } else {
+        Some(symbol.to_string())
+    }
+}
+
 fn is_markdown_path(path: Option<&std::path::Path>) -> bool {
     let Some(path) = path else {
         return false;
@@ -1205,4 +1697,39 @@ fn is_markdown_path(path: Option<&std::path::Path>) -> bool {
         ext.to_ascii_lowercase().as_str(),
         "md" | "markdown" | "mdown" | "mkd" | "mdx"
     )
+}
+
+fn strip_snippet_placeholders(input: &str) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            if chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    chars.next();
+                }
+                continue;
+            }
+            if chars.peek() == Some(&'{') {
+                chars.next();
+                while let Some(c) = chars.next() {
+                    if c == '}' {
+                        break;
+                    }
+                    if c == ':' {
+                        while let Some(fallback) = chars.next() {
+                            if fallback == '}' {
+                                break;
+                            }
+                            out.push(fallback);
+                        }
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }

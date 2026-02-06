@@ -3,6 +3,7 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, Rgba, Sense, Stroke, Vec2}
 use crate::editor::{DiffHunk, DiffKind, Editor};
 use crate::syntax::{StyledToken, SyntaxHighlighter};
 use arboard::Clipboard;
+use std::process::Command;
 
 const MINIMAP_SPACING: f32 = 8.0;
 const MIN_EDITOR_WIDTH_FOR_MINIMAP: f32 = 600.0;
@@ -36,6 +37,19 @@ impl EditorThemeKind {
             Self::SolarizedDark => EditorTheme::solarized_dark(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontFamilyKind {
+    Monospace,
+    Proportional,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorFontSettings {
+    pub size: f32,
+    pub family: FontFamilyKind,
+    pub ligatures: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -126,11 +140,12 @@ pub fn show(
     clipboard: &mut Option<Clipboard>,
     highlighter: &SyntaxHighlighter,
     theme: &EditorTheme,
+    font_settings: &EditorFontSettings,
     search_query: Option<&str>,
     auto_focus: bool,
 ) -> bool {
     let mut changed = false;
-    let metrics = EditorMetrics::compute(ui, editor.line_count(), theme);
+    let metrics = EditorMetrics::compute(ui, editor.line_count(), theme, font_settings);
     let available = ui.available_rect_before_wrap();
     
     // Calculate minimap layout
@@ -294,6 +309,7 @@ pub fn show(
         &metrics,
         highlighter,
         theme,
+        font_settings,
         &full_text,
         search_query,
         &visible_lines,
@@ -433,8 +449,16 @@ pub struct EditorMetrics {
 }
 
 impl EditorMetrics {
-    pub fn compute(ui: &egui::Ui, line_count: usize, theme: &EditorTheme) -> Self {
-        let font_id = egui::FontId::monospace(13.5);
+    pub fn compute(
+        ui: &egui::Ui,
+        line_count: usize,
+        theme: &EditorTheme,
+        font_settings: &EditorFontSettings,
+    ) -> Self {
+        let font_id = match font_settings.family {
+            FontFamilyKind::Monospace => egui::FontId::monospace(font_settings.size),
+            FontFamilyKind::Proportional => egui::FontId::proportional(font_settings.size),
+        };
         let line_height = ui.fonts(|f| f.row_height(&font_id));
         let char_width = ui.fonts(|f| f.glyph_width(&font_id, 'm'));
         let digits = line_count.to_string().len().max(3);
@@ -494,6 +518,7 @@ fn handle_keyboard(
             egui::Event::Text(text) => {
                 if !ui.input(|i| i.modifiers.command) {
                     editor.insert_text(&text);
+                    editor.completion_visible = false;
                     changed = true;
                 }
             }
@@ -521,11 +546,26 @@ fn handle_keyboard(
             egui::Event::Key { key, pressed: true, modifiers, .. } => {
                 match key {
                     egui::Key::Enter => {
-                        editor.insert_newline();
-                        changed = true;
+                        if editor.completion_visible {
+                            editor.apply_completion(0);
+                            changed = true;
+                        } else {
+                            editor.insert_newline();
+                            changed = true;
+                        }
                     }
                     egui::Key::D if modifiers.command => {
                         editor.select_next_occurrence();
+                    }
+                    egui::Key::C if modifiers.command && modifiers.alt && modifiers.shift => {
+                        editor.add_column_cursors_from_selection();
+                    }
+                    egui::Key::R if modifiers.command && modifiers.alt => {
+                        editor.toggle_macro_recording();
+                    }
+                    egui::Key::P if modifiers.command && modifiers.alt => {
+                        editor.play_last_macro();
+                        changed = true;
                     }
                     egui::Key::L if modifiers.command && modifiers.shift => {
                         editor.select_all_occurrences();
@@ -616,8 +656,30 @@ fn handle_keyboard(
                     egui::Key::End => editor.move_end(modifiers.shift),
                     egui::Key::Tab => {
                         if !modifiers.shift {
-                             editor.insert_tab();
+                             if editor.completion_visible {
+                                editor.apply_completion(0);
+                             } else {
+                                editor.insert_tab();
+                             }
                              changed = true;
+                        }
+                    }
+                    egui::Key::Space if modifiers.command => {
+                        editor.request_completion = true;
+                    }
+                    egui::Key::F if modifiers.command && modifiers.shift => {
+                        editor.request_formatting = true;
+                    }
+                    egui::Key::Escape => {
+                        editor.completion_visible = false;
+                    }
+                    egui::Key::F12 => {
+                        if modifiers.shift {
+                            editor.request_references = true;
+                        } else if modifiers.alt {
+                            editor.request_implementations = true;
+                        } else {
+                            editor.request_definition = true;
                         }
                     }
                     _ => {}
@@ -626,6 +688,9 @@ fn handle_keyboard(
             _ => {}
         }
     }
+    let errors = editor.diagnostics.iter().filter(|d| d.severity <= 2).count();
+    editor.notification_badges =
+        errors + if editor.completion_visible { 1 } else { 0 } + if editor.macro_recording { 1 } else { 0 };
     changed
 }
 
@@ -677,7 +742,73 @@ fn cursor_visual_y(
 }
 
 fn read_diff_hunks(_path: Option<&std::path::Path>) -> Vec<DiffHunk> {
-    Vec::new() // Stub to avoid git dependency issues for now
+    let Some(path) = _path else {
+        return Vec::new();
+    };
+    let Some(parent) = path.parent() else {
+        return Vec::new();
+    };
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
+    let output = match Command::new("git")
+        .arg("diff")
+        .arg("--unified=0")
+        .arg("--")
+        .arg(name)
+        .current_dir(parent)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let mut hunks = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.starts_with("@@ ") {
+            continue;
+        }
+        let Some((_, rest)) = line.split_once('+') else {
+            continue;
+        };
+        let Some((new_range, _)) = rest.split_once(" @@") else {
+            continue;
+        };
+        let (new_start, new_len) = parse_diff_range(new_range);
+        if new_start == 0 {
+            continue;
+        }
+        let kind = if new_len == 0 {
+            DiffKind::Removed
+        } else {
+            DiffKind::Modified
+        };
+        let mut start = new_start.saturating_sub(1);
+        let mut end = start + new_len.max(1);
+        if line.contains("-0,0") {
+            // insertion hunk
+            start = new_start.saturating_sub(1);
+            end = start + new_len.max(1);
+            hunks.push(DiffHunk {
+                start,
+                end,
+                kind: DiffKind::Added,
+            });
+            continue;
+        }
+        hunks.push(DiffHunk { start, end, kind });
+    }
+    hunks
+}
+
+fn parse_diff_range(input: &str) -> (usize, usize) {
+    if let Some((start, len)) = input.split_once(',') {
+        (
+            start.parse::<usize>().unwrap_or(0),
+            len.parse::<usize>().unwrap_or(1),
+        )
+    } else {
+        (input.parse::<usize>().unwrap_or(0), 1)
+    }
 }
 
 fn render_minimap_fixed(
@@ -820,6 +951,7 @@ fn render_lines(
     metrics: &EditorMetrics,
     highlighter: &SyntaxHighlighter,
     theme: &EditorTheme,
+    font_settings: &EditorFontSettings,
     full_text: &str,
     search_query: Option<&str>,
     visible_lines: &[usize],
@@ -839,15 +971,31 @@ fn render_lines(
     let visible_count = (rect.height() / metrics.line_height).ceil() as usize + 1;
     let last_line = (first_line + visible_count).min(visible_lines.len());
 
+    let first_doc_line = visible_lines[first_line];
+    let last_doc_line_exclusive = visible_lines[last_line.saturating_sub(1)] + 1;
     let highlighted = highlighter.highlight_lines(
         full_text,
         editor.file_path.as_deref(),
         editor.syntax_override.as_deref(),
-        0,
-        editor.line_count(),
+        first_doc_line,
+        last_doc_line_exclusive,
     );
+    let mut highlighted_by_line = std::collections::HashMap::new();
+    for (idx, tokens) in highlighted.into_iter().enumerate() {
+        highlighted_by_line.insert(first_doc_line + idx, tokens);
+    }
 
     let active_lines: Vec<usize> = editor.cursors.iter().map(|c| c.pos.line).collect();
+    let code_lens_by_line: std::collections::HashMap<usize, &str> = editor
+        .code_lens_metrics
+        .iter()
+        .map(|metric| (metric.line, metric.label.as_str()))
+        .collect();
+    let diagnostics_by_line: std::collections::HashMap<usize, (&str, u8)> = editor
+        .diagnostics
+        .iter()
+        .map(|d| (d.line, (d.message.as_str(), d.severity)))
+        .collect();
 
     let gutter_rect = Rect::from_min_size(
         rect.left_top(),
@@ -863,9 +1011,24 @@ fn render_lines(
         Stroke::new(1.0, theme.gutter_divider),
     );
 
+    draw_column_rulers(&painter, rect, metrics, editor);
+
     for vis_idx in first_line..last_line {
         let line_idx = visible_lines[vis_idx];
         let y = rect.top() + (vis_idx as f32) * metrics.line_height - editor.scroll_y;
+
+        if let Some(label) = code_lens_by_line.get(&line_idx) {
+            painter.text(
+                Pos2::new(
+                    rect.left() + metrics.gutter_width + 4.0,
+                    y - metrics.line_height * 0.25,
+                ),
+                egui::Align2::LEFT_CENTER,
+                *label,
+                FontId::monospace(11.0),
+                Color32::from_gray(125),
+            );
+        }
 
         if active_lines.contains(&line_idx) {
             let line_rect = Rect::from_min_size(
@@ -881,6 +1044,33 @@ fn render_lines(
             theme.line_num
         };
         let ln_text = format!("{}", line_idx + 1);
+        if let Some(kind) = diff_kind_for_line(editor.diff_hunks.as_slice(), line_idx) {
+            let color = match kind {
+                DiffKind::Added => Color32::from_rgb(75, 185, 116),
+                DiffKind::Removed => Color32::from_rgb(214, 90, 90),
+                DiffKind::Modified => Color32::from_rgb(220, 170, 80),
+            };
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(rect.left(), y + 1.0),
+                    Vec2::new(3.0, metrics.line_height - 2.0),
+                ),
+                0.0,
+                color,
+            );
+        }
+        if let Some((_, severity)) = diagnostics_by_line.get(&line_idx) {
+            let color = if *severity <= 2 {
+                Color32::from_rgb(225, 85, 85)
+            } else {
+                Color32::from_rgb(225, 185, 85)
+            };
+            painter.circle_filled(
+                Pos2::new(rect.left() + 6.0, y + metrics.line_height / 2.0),
+                2.5,
+                color,
+            );
+        }
         painter.text(
             Pos2::new(
                 rect.left() + metrics.gutter_width - theme.gutter_padding / 2.0,
@@ -899,6 +1089,17 @@ fn render_lines(
             }
         }
 
+        let line_text_for_guides = editor.line_text(line_idx);
+        draw_indent_guides(
+            &painter,
+            rect,
+            &line_text_for_guides,
+            y,
+            metrics,
+            editor,
+            theme,
+        );
+
         for cursor in &editor.cursors {
             if let Some((sel_start, sel_end)) = cursor.selection_ordered() {
                 draw_selection(
@@ -907,33 +1108,62 @@ fn render_lines(
             }
         }
 
-        let hl_idx = line_idx;
         let text_x_base = rect.left() + metrics.gutter_width + 4.0 - editor.scroll_x;
-        if let Some(tokens) = highlighted.get(hl_idx) {
+        if let Some(tokens) = highlighted_by_line.get(&line_idx) {
             let mut offset_x = text_x_base;
             for token in tokens {
                 if !token.text.is_empty() {
+                    let text = if font_settings.ligatures {
+                        apply_ligatures(&token.text)
+                    } else {
+                        token.text.clone()
+                    };
                     painter.text(
                         Pos2::new(offset_x, y + metrics.line_height / 2.0),
                         egui::Align2::LEFT_CENTER,
-                        &token.text,
+                        &text,
                         metrics.font_id.clone(),
                         token.color,
                     );
-                    offset_x += token.text.chars().count() as f32 * metrics.char_width;
+                    offset_x += text.chars().count() as f32 * metrics.char_width;
                 }
             }
+
+            draw_inline_blame(
+                &painter,
+                rect,
+                line_idx,
+                offset_x,
+                y,
+                metrics,
+                editor,
+            );
         } else {
             let text = editor.line_text(line_idx);
             if !text.is_empty() {
+                let draw_text = if font_settings.ligatures {
+                    apply_ligatures(&text)
+                } else {
+                    text.clone()
+                };
                 painter.text(
                     Pos2::new(text_x_base, y + metrics.line_height / 2.0),
                     egui::Align2::LEFT_CENTER,
-                    &text,
+                    &draw_text,
                     metrics.font_id.clone(),
                     theme.text,
                 );
             }
+            let text_end_x = text_x_base + text.chars().count() as f32 * metrics.char_width;
+            draw_inline_blame(
+                &painter,
+                rect,
+                line_idx,
+                text_end_x,
+                y,
+                metrics,
+                editor,
+            );
         }
 
         if cursor_visible {
@@ -979,6 +1209,180 @@ fn render_lines(
                 painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
             }
         }
+
+        if let Some((message, severity)) = diagnostics_by_line.get(&line_idx) {
+            let color = if *severity <= 2 {
+                Color32::from_rgb(240, 125, 125)
+            } else {
+                Color32::from_rgb(240, 210, 120)
+            };
+            painter.text(
+                Pos2::new(rect.right() - 8.0, y + metrics.line_height / 2.0),
+                egui::Align2::RIGHT_CENTER,
+                message,
+                FontId::monospace(10.5),
+                color,
+            );
+        }
+    }
+
+    draw_completion_popup(&painter, rect, metrics, editor);
+}
+
+fn apply_ligatures(text: &str) -> String {
+    text.replace("->", "→")
+        .replace("=>", "⇒")
+        .replace("<=", "≤")
+        .replace(">=", "≥")
+        .replace("!=", "≠")
+        .replace("==", "≡")
+}
+
+fn diff_kind_for_line(hunks: &[DiffHunk], line_idx: usize) -> Option<DiffKind> {
+    hunks
+        .iter()
+        .find(|h| line_idx >= h.start && line_idx < h.end)
+        .map(|h| h.kind)
+}
+
+fn draw_column_rulers(
+    painter: &egui::Painter,
+    rect: &Rect,
+    metrics: &EditorMetrics,
+    editor: &Editor,
+) {
+    for ruler_col in [80usize, 120usize] {
+        let x = rect.left() + metrics.gutter_width + 4.0 + ruler_col as f32 * metrics.char_width
+            - editor.scroll_x;
+        if x <= rect.left() + metrics.gutter_width || x >= rect.right() {
+            continue;
+        }
+        painter.line_segment(
+            [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+            Stroke::new(1.0, Color32::from_black_alpha(38)),
+        );
+    }
+}
+
+fn draw_indent_guides(
+    painter: &egui::Painter,
+    rect: &Rect,
+    line_text: &str,
+    y: f32,
+    metrics: &EditorMetrics,
+    editor: &Editor,
+    theme: &EditorTheme,
+) {
+    if editor.indent_width == 0 {
+        return;
+    }
+
+    let mut visual_indent_cols = 0usize;
+    for ch in line_text.chars() {
+        match ch {
+            ' ' => visual_indent_cols += 1,
+            '\t' => visual_indent_cols += editor.indent_width,
+            _ => break,
+        }
+    }
+
+    if visual_indent_cols < editor.indent_width {
+        return;
+    }
+
+    let levels = visual_indent_cols / editor.indent_width;
+    for level in 1..=levels {
+        let col = level * editor.indent_width;
+        let x = rect.left() + metrics.gutter_width + 4.0 + col as f32 * metrics.char_width
+            - editor.scroll_x;
+        if x <= rect.left() + metrics.gutter_width || x >= rect.right() {
+            continue;
+        }
+        painter.line_segment(
+            [Pos2::new(x, y + 2.0), Pos2::new(x, y + metrics.line_height - 2.0)],
+            Stroke::new(1.0, theme.gutter_divider.gamma_multiply(0.45)),
+        );
+    }
+}
+
+fn draw_inline_blame(
+    painter: &egui::Painter,
+    rect: &Rect,
+    line_idx: usize,
+    content_end_x: f32,
+    y: f32,
+    metrics: &EditorMetrics,
+    editor: &Editor,
+) {
+    let Some(entry) = editor.inline_blame.get(line_idx) else {
+        return;
+    };
+
+    if entry.author.is_empty() {
+        return;
+    }
+
+    let summary = if entry.summary.chars().count() > 48 {
+        let mut s: String = entry.summary.chars().take(48).collect();
+        s.push_str("...");
+        s
+    } else {
+        entry.summary.clone()
+    };
+    let label = if summary.is_empty() {
+        format!("{} {}", entry.commit_short, entry.author)
+    } else {
+        format!("{} {}: {}", entry.commit_short, entry.author, summary)
+    };
+
+    let draw_x = (content_end_x + metrics.char_width * 2.0).min(rect.right() - 8.0);
+    if draw_x >= rect.right() - 20.0 {
+        return;
+    }
+
+    painter.text(
+        Pos2::new(draw_x, y + metrics.line_height / 2.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::monospace(10.5),
+        Color32::from_gray(110),
+    );
+}
+
+fn draw_completion_popup(
+    painter: &egui::Painter,
+    rect: &Rect,
+    metrics: &EditorMetrics,
+    editor: &Editor,
+) {
+    if !editor.completion_visible || editor.completion_items.is_empty() || editor.cursors.is_empty() {
+        return;
+    }
+    let cursor = &editor.cursors[0];
+    let popup_x = rect.left() + metrics.gutter_width + 4.0 + cursor.pos.col as f32 * metrics.char_width
+        - editor.scroll_x;
+    let popup_y = rect.top() + cursor.pos.line as f32 * metrics.line_height - editor.scroll_y + metrics.line_height;
+    let width = 320.0_f32.min(rect.width() - 20.0);
+    let rows = editor.completion_items.len().min(6);
+    let height = rows as f32 * 18.0 + 8.0;
+    let popup_rect = Rect::from_min_size(
+        Pos2::new(popup_x.min(rect.right() - width - 4.0), popup_y.min(rect.bottom() - height - 4.0)),
+        Vec2::new(width, height),
+    );
+    painter.rect_filled(popup_rect, 4.0, Color32::from_black_alpha(220));
+    painter.rect_stroke(popup_rect, 4.0, Stroke::new(1.0, Color32::from_gray(80)));
+
+    for (idx, item) in editor.completion_items.iter().take(rows).enumerate() {
+        let y = popup_rect.top() + 6.0 + idx as f32 * 18.0;
+        let prefix = if item.is_snippet { "S" } else { "L" };
+        let text = format!("[{}] {}  {}", prefix, item.label, item.detail);
+        painter.text(
+            Pos2::new(popup_rect.left() + 8.0, y),
+            egui::Align2::LEFT_TOP,
+            text,
+            FontId::monospace(10.5),
+            if idx == 0 { Color32::WHITE } else { Color32::from_gray(190) },
+        );
     }
 }
 

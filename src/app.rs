@@ -1,12 +1,17 @@
 use arboard::Clipboard;
 use eframe::egui;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
+use std::time::SystemTime;
 
-use crate::editor::Editor;
+use crate::editor::{CodeLensMetric, Editor, InlineBlameEntry};
+use crate::lsp::{RequestKind, Snapshot as LspSnapshot};
 use crate::syntax::SyntaxHighlighter;
 use crate::ui::command_palette::{CommandId, CommandPalette};
-use crate::ui::editor_view::EditorThemeKind;
+use crate::ui::editor_view::{EditorFontSettings, EditorThemeKind, FontFamilyKind};
 use crate::ui::markdown_preview;
 
 const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(36, 37, 38);
@@ -39,6 +44,131 @@ enum TabAction {
     NewTab,
 }
 
+struct LspWorkerOutput {
+    path: PathBuf,
+    snapshot: LspSnapshot,
+    request: RequestKind,
+}
+
+#[derive(Clone, Debug)]
+struct ExternalChangePrompt {
+    tab_idx: usize,
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct RefactorPreview {
+    tab_idx: usize,
+    title: String,
+    diff_preview: String,
+    original_text: String,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceTask {
+    name: String,
+    command: String,
+}
+
+#[derive(Clone, Debug)]
+struct RunConfiguration {
+    name: String,
+    command: String,
+    env_overrides: String,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalProfile {
+    name: String,
+    shell: String,
+    theme_hint: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GitChangedFile {
+    path: String,
+    status: String,
+    staged: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GitCommitEntry {
+    hash: String,
+    summary: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GitPanelState {
+    files: Vec<GitChangedFile>,
+    commits: Vec<GitCommitEntry>,
+    selected_file: Option<String>,
+    diff_text: String,
+    blame_text: String,
+    commit_message: String,
+    branch_input: String,
+    stash_message: String,
+    op_status: String,
+    last_refresh: f64,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceFontSettings {
+    size: f32,
+    family: FontFamilyKind,
+    ligatures: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarTab {
+    Explorer,
+    Search,
+    Git,
+    Debug,
+    Collab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitMode {
+    None,
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockPanelTab {
+    Terminal,
+    Output,
+    Problems,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DockSide {
+    Bottom,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeymapPreset {
+    Vscode,
+    Sublime,
+    JetBrains,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateChannel {
+    Stable,
+    Beta,
+    Nightly,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ShortcutSpec {
+    key: egui::Key,
+    command: bool,
+    shift: bool,
+    alt: bool,
+}
+
 pub struct LuxApp {
     pub editors: Vec<Editor>,
     pub active_tab: usize,
@@ -54,19 +184,152 @@ pub struct LuxApp {
     /// If Some, show a "save before closing?" dialog for this tab index.
     pub confirm_close_tab: Option<usize>,
     pub pending_close_others: Option<usize>,
+    pending_external_change: Option<ExternalChangePrompt>,
     pub closed_tabs: Vec<Editor>,
     pub dragging_tab: Option<usize>,
     pub editor_theme: EditorThemeKind,
     git_info: Option<crate::ui::status_bar::GitInfo>,
     git_last_check: f64,
+    show_sidebar: bool,
+    sidebar_tab: SidebarTab,
+    sidebar_search_query: String,
+    sidebar_search_case_sensitive: bool,
+    sidebar_search_regex: bool,
+    sidebar_search_include_glob: String,
+    sidebar_search_exclude_glob: String,
+    sidebar_search_results: Vec<String>,
+    sidebar_search_selected: Option<String>,
+    sidebar_search_preview: String,
+    sidebar_replace_input: String,
+    sidebar_search_message: String,
+    sidebar_symbol_query: String,
+    sidebar_symbol_results: Vec<String>,
+    refactor_name_input: String,
+    refactor_status: String,
+    refactor_preview: Option<RefactorPreview>,
+    sidebar_files: Vec<PathBuf>,
+    sidebar_last_scan: f64,
+    quick_open_query: String,
+    recent_workspaces: Vec<PathBuf>,
+    file_ops_target: String,
+    file_ops_message: String,
+    debug_breakpoints: HashMap<PathBuf, HashSet<usize>>,
+    debug_watch_input: String,
+    debug_watches: Vec<String>,
+    debug_call_stack: Vec<String>,
+    tasks: Vec<WorkspaceTask>,
+    new_task_name: String,
+    new_task_command: String,
+    run_configs: Vec<RunConfiguration>,
+    new_run_config_name: String,
+    new_run_config_command: String,
+    new_run_config_env: String,
+    diagnostics_show_error: bool,
+    diagnostics_show_warning: bool,
+    diagnostics_show_info: bool,
+    diagnostics_language_enabled: HashMap<String, bool>,
+    format_on_save: bool,
+    format_on_type: bool,
+    formatter_by_language: HashMap<String, String>,
+    lint_workspace_overrides: HashMap<String, String>,
+    lint_folder_overrides: HashMap<PathBuf, HashMap<String, String>>,
+    lint_override_rule_input: String,
+    lint_override_value_input: String,
+    collab_enabled: bool,
+    collab_session_id: String,
+    collab_review_mode: bool,
+    collab_note_input: String,
+    collab_notes: HashMap<PathBuf, Vec<(usize, String)>>,
+    collab_peer_cursors: Vec<String>,
+    split_mode: SplitMode,
+    split_secondary_tab: Option<usize>,
+    zen_mode: bool,
+    focus_mode: bool,
+    show_dock_panel: bool,
+    dock_tab: DockPanelTab,
+    dock_side: DockSide,
+    dock_size: f32,
+    terminal_profiles: Vec<TerminalProfile>,
+    terminal_profile_idx: usize,
+    terminal_split_panes: bool,
+    terminal_input_secondary: String,
+    terminal_log_secondary: Vec<String>,
+    terminal_input: String,
+    terminal_log: Vec<String>,
+    output_log: Vec<String>,
+    output_filter: String,
+    problems_filter: String,
+    workspace_fonts: HashMap<PathBuf, WorkspaceFontSettings>,
+    folder_font_overrides: HashMap<PathBuf, WorkspaceFontSettings>,
+    folder_override_path_input: String,
+    theme_ui_density: f32,
+    theme_override_bg: Option<egui::Color32>,
+    theme_override_text: Option<egui::Color32>,
+    keymap_preset: KeymapPreset,
+    binding_palette: String,
+    binding_open: String,
+    binding_save: String,
+    binding_find: String,
+    binding_format: String,
+    custom_shortcuts: HashMap<String, ShortcutSpec>,
+    autosave_enabled: bool,
+    autosave_interval_sec: f64,
+    last_autosave: f64,
+    file_mtimes: HashMap<PathBuf, SystemTime>,
+    file_watch_last_check: f64,
+    telemetry_opt_in: bool,
+    update_channel: UpdateChannel,
+    plugin_sandbox_enabled: bool,
+    plugins: Vec<crate::plugin::PluginManifest>,
+    workspace_root: PathBuf,
+    registry_entries: Vec<crate::plugin::RegistryEntry>,
+    marketplace_status: String,
+    show_git_panel: bool,
+    git_panel: GitPanelState,
+    lsp_rx: Option<Receiver<LspWorkerOutput>>,
+    lsp_last_request: f64,
 }
 
 impl LuxApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let mut command_palette = CommandPalette::new();
+        command_palette.register_extension_commands(
+            "Workspace",
+            [
+                ("Open Docs", "", "open_docs"),
+                ("Run Benchmark", "", "run_benchmark"),
+            ],
+        );
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let plugins = crate::plugin::load_plugin_manifests(&workspace);
+        let registry_entries = crate::plugin::load_registry(&workspace);
+        let (workspace_font_setting, folder_font_overrides) = load_workspace_settings(&workspace);
+        let mut recent_workspaces = load_recent_workspaces();
+        if !recent_workspaces.iter().any(|p| p == &workspace) {
+            recent_workspaces.insert(0, workspace.clone());
+            if recent_workspaces.len() > 12 {
+                recent_workspaces.truncate(12);
+            }
+            persist_recent_workspaces(recent_workspaces.as_slice());
+        }
+        for plugin in &plugins {
+            let tuples: Vec<(String, String, String)> = plugin
+                .commands
+                .iter()
+                .map(|cmd| (cmd.title.clone(), cmd.shortcut.clone(), cmd.id.clone()))
+                .collect();
+            command_palette.register_extension_commands(
+                plugin.name.as_str(),
+                tuples
+                    .iter()
+                    .map(|(title, shortcut, id)| (title.as_str(), shortcut.as_str(), id.as_str())),
+            );
+        }
+        let (editors, active_tab) = load_session_editors().unwrap_or_else(|| (vec![Editor::new()], 0));
         Self {
-            editors: vec![Editor::new()],
-            active_tab: 0,
-            command_palette: CommandPalette::new(),
+            editors,
+            active_tab,
+            command_palette,
             show_search: false,
             show_replace: false,
             search_input: String::new(),
@@ -77,11 +340,143 @@ impl LuxApp {
             highlighter: SyntaxHighlighter::new(),
             confirm_close_tab: None,
             pending_close_others: None,
+            pending_external_change: None,
             closed_tabs: Vec::new(),
             dragging_tab: None,
             editor_theme: EditorThemeKind::Monokai,
             git_info: None,
             git_last_check: 0.0,
+            show_sidebar: true,
+            sidebar_tab: SidebarTab::Explorer,
+            sidebar_search_query: String::new(),
+            sidebar_search_case_sensitive: false,
+            sidebar_search_regex: false,
+            sidebar_search_include_glob: String::new(),
+            sidebar_search_exclude_glob: String::new(),
+            sidebar_search_results: Vec::new(),
+            sidebar_search_selected: None,
+            sidebar_search_preview: String::new(),
+            sidebar_replace_input: String::new(),
+            sidebar_search_message: String::new(),
+            sidebar_symbol_query: String::new(),
+            sidebar_symbol_results: Vec::new(),
+            refactor_name_input: String::new(),
+            refactor_status: String::new(),
+            refactor_preview: None,
+            sidebar_files: Vec::new(),
+            sidebar_last_scan: 0.0,
+            quick_open_query: String::new(),
+            recent_workspaces,
+            file_ops_target: String::new(),
+            file_ops_message: String::new(),
+            debug_breakpoints: HashMap::new(),
+            debug_watch_input: String::new(),
+            debug_watches: Vec::new(),
+            debug_call_stack: vec!["main()".to_string()],
+            tasks: vec![
+                WorkspaceTask {
+                    name: "build".to_string(),
+                    command: "cargo build".to_string(),
+                },
+                WorkspaceTask {
+                    name: "test".to_string(),
+                    command: "cargo test".to_string(),
+                },
+                WorkspaceTask {
+                    name: "lint".to_string(),
+                    command: "cargo clippy".to_string(),
+                },
+            ],
+            new_task_name: String::new(),
+            new_task_command: String::new(),
+            run_configs: Vec::new(),
+            new_run_config_name: String::new(),
+            new_run_config_command: String::new(),
+            new_run_config_env: String::new(),
+            diagnostics_show_error: true,
+            diagnostics_show_warning: true,
+            diagnostics_show_info: true,
+            diagnostics_language_enabled: HashMap::new(),
+            format_on_save: false,
+            format_on_type: false,
+            formatter_by_language: HashMap::new(),
+            lint_workspace_overrides: HashMap::new(),
+            lint_folder_overrides: HashMap::new(),
+            lint_override_rule_input: String::new(),
+            lint_override_value_input: String::new(),
+            collab_enabled: false,
+            collab_session_id: String::new(),
+            collab_review_mode: false,
+            collab_note_input: String::new(),
+            collab_notes: HashMap::new(),
+            collab_peer_cursors: Vec::new(),
+            split_mode: SplitMode::None,
+            split_secondary_tab: None,
+            zen_mode: false,
+            focus_mode: false,
+            show_dock_panel: true,
+            dock_tab: DockPanelTab::Terminal,
+            dock_side: DockSide::Bottom,
+            dock_size: 180.0,
+            terminal_profiles: vec![
+                TerminalProfile {
+                    name: "Default".to_string(),
+                    shell: "sh".to_string(),
+                    theme_hint: "Dark".to_string(),
+                },
+                TerminalProfile {
+                    name: "Bash".to_string(),
+                    shell: "bash".to_string(),
+                    theme_hint: "Classic".to_string(),
+                },
+                TerminalProfile {
+                    name: "Zsh".to_string(),
+                    shell: "zsh".to_string(),
+                    theme_hint: "Neon".to_string(),
+                },
+            ],
+            terminal_profile_idx: 0,
+            terminal_split_panes: false,
+            terminal_input_secondary: String::new(),
+            terminal_log_secondary: Vec::new(),
+            terminal_input: String::new(),
+            terminal_log: Vec::new(),
+            output_log: Vec::new(),
+            output_filter: String::new(),
+            problems_filter: String::new(),
+            workspace_fonts: {
+                let mut map = HashMap::new();
+                map.insert(workspace.clone(), workspace_font_setting);
+                map
+            },
+            folder_font_overrides,
+            folder_override_path_input: String::new(),
+            theme_ui_density: 1.0,
+            theme_override_bg: None,
+            theme_override_text: None,
+            keymap_preset: KeymapPreset::Vscode,
+            binding_palette: String::new(),
+            binding_open: String::new(),
+            binding_save: String::new(),
+            binding_find: String::new(),
+            binding_format: String::new(),
+            custom_shortcuts: HashMap::new(),
+            autosave_enabled: true,
+            autosave_interval_sec: 5.0,
+            last_autosave: 0.0,
+            file_mtimes: HashMap::new(),
+            file_watch_last_check: 0.0,
+            telemetry_opt_in: false,
+            update_channel: UpdateChannel::Stable,
+            plugin_sandbox_enabled: true,
+            plugins,
+            workspace_root: workspace,
+            registry_entries,
+            marketplace_status: String::new(),
+            show_git_panel: true,
+            git_panel: GitPanelState::default(),
+            lsp_rx: None,
+            lsp_last_request: 0.0,
         }
     }
 
@@ -220,8 +615,1394 @@ impl LuxApp {
         self.git_info = read_git_info(path.as_deref());
     }
 
+    fn active_repo_dir(&self) -> Option<PathBuf> {
+        self.editors
+            .get(self.active_tab)
+            .and_then(|e| e.file_path.as_ref())
+            .and_then(|p| p.parent())
+            .and_then(|cwd| resolve_git_root(cwd))
+    }
+
+    fn active_workspace_key(&self) -> PathBuf {
+        self.active_repo_dir().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        })
+    }
+
+    fn active_language_label(&self) -> String {
+        let editor = &self.editors[self.active_tab];
+        self.highlighter.syntax_name_for(
+            editor.file_path.as_deref(),
+            editor.first_line_text().as_deref(),
+            editor.syntax_override.as_deref(),
+        )
+    }
+
+    fn current_font_settings(&self) -> EditorFontSettings {
+        let key = self.active_workspace_key();
+        let mut base = self
+            .workspace_fonts
+            .get(&key)
+            .cloned()
+            .unwrap_or(WorkspaceFontSettings {
+                size: 13.5,
+                family: FontFamilyKind::Monospace,
+                ligatures: false,
+            });
+        if let Some(path) = self.editors.get(self.active_tab).and_then(|e| e.file_path.as_ref()) {
+            for (folder, override_font) in &self.folder_font_overrides {
+                if path.starts_with(folder) {
+                    base = override_font.clone();
+                    break;
+                }
+            }
+        }
+        EditorFontSettings {
+            size: base.size,
+            family: base.family,
+            ligatures: base.ligatures,
+        }
+    }
+
+    fn refresh_git_panel_data(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.git_panel.last_refresh < 1.5 {
+            return;
+        }
+        self.git_panel.last_refresh = now;
+
+        let Some(repo) = self.active_repo_dir() else {
+            self.git_panel.files.clear();
+            self.git_panel.commits.clear();
+            self.git_panel.diff_text.clear();
+            self.git_panel.blame_text = "No repository".to_string();
+            return;
+        };
+
+        self.git_panel.files = read_git_files(&repo);
+        self.git_panel.commits = read_git_commits(&repo);
+
+        if self.git_panel.selected_file.is_none() {
+            self.git_panel.selected_file = self.git_panel.files.first().map(|f| f.path.clone());
+        }
+        if let Some(selected) = self.git_panel.selected_file.clone() {
+            self.git_panel.diff_text = read_git_diff_for_file(&repo, &selected);
+        }
+        self.git_panel.blame_text = read_active_line_blame(&repo, &self.editors[self.active_tab]);
+    }
+
+    fn show_git_panel_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.show_git_panel {
+            return;
+        }
+        let Some(repo) = self.active_repo_dir() else {
+            return;
+        };
+
+        egui::SidePanel::right("git_panel")
+            .resizable(true)
+            .default_width(360.0)
+            .show_inside(ui, |ui| {
+                ui.heading("Git");
+                ui.label(repo.to_string_lossy());
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Refresh").clicked() {
+                        self.git_panel.last_refresh = 0.0;
+                    }
+                    if ui.button("Commit").clicked() {
+                        if !self.git_panel.commit_message.trim().is_empty() {
+                            let _ = git_commit(&repo, self.git_panel.commit_message.trim());
+                            self.git_panel.commit_message.clear();
+                            self.git_panel.last_refresh = 0.0;
+                        }
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.git_panel.commit_message)
+                        .hint_text("Commit message"),
+                );
+                ui.add_space(4.0);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.git_panel.branch_input)
+                        .hint_text("Branch for checkout/merge/rebase"),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Checkout").clicked() {
+                        if git_checkout_branch(&repo, self.git_panel.branch_input.trim()) {
+                            self.git_panel.op_status = "Checkout ok".to_string();
+                            self.git_panel.last_refresh = 0.0;
+                        } else {
+                            self.git_panel.op_status = "Checkout failed".to_string();
+                        }
+                    }
+                    if ui.button("Merge").clicked() {
+                        if git_merge_branch(&repo, self.git_panel.branch_input.trim()) {
+                            self.git_panel.op_status = "Merge ok".to_string();
+                            self.git_panel.last_refresh = 0.0;
+                        } else {
+                            self.git_panel.op_status = "Merge failed".to_string();
+                        }
+                    }
+                    if ui.button("Rebase").clicked() {
+                        if git_rebase_branch(&repo, self.git_panel.branch_input.trim()) {
+                            self.git_panel.op_status = "Rebase ok".to_string();
+                            self.git_panel.last_refresh = 0.0;
+                        } else {
+                            self.git_panel.op_status = "Rebase failed".to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.git_panel.stash_message)
+                            .hint_text("Stash message"),
+                    );
+                    if ui.button("Stash Push").clicked() {
+                        if git_stash_push(&repo, self.git_panel.stash_message.trim()) {
+                            self.git_panel.op_status = "Stash push ok".to_string();
+                            self.git_panel.last_refresh = 0.0;
+                        } else {
+                            self.git_panel.op_status = "Stash push failed".to_string();
+                        }
+                    }
+                    if ui.button("Stash Pop").clicked() {
+                        if git_stash_pop(&repo) {
+                            self.git_panel.op_status = "Stash pop ok".to_string();
+                            self.git_panel.last_refresh = 0.0;
+                        } else {
+                            self.git_panel.op_status = "Stash pop failed".to_string();
+                        }
+                    }
+                });
+                if !self.git_panel.op_status.is_empty() {
+                    ui.label(egui::RichText::new(&self.git_panel.op_status).monospace());
+                }
+
+                ui.separator();
+                ui.label("Changed files");
+                egui::ScrollArea::vertical().max_height(170.0).show(ui, |ui| {
+                    for file in self.git_panel.files.clone() {
+                        ui.horizontal(|ui| {
+                            let selected = self.git_panel.selected_file.as_deref()
+                                == Some(file.path.as_str());
+                            if ui
+                                .selectable_label(
+                                    selected,
+                                    format!(
+                                        "[{}{}] {}",
+                                        if file.staged { "S" } else { "U" },
+                                        file.status,
+                                        file.path
+                                    ),
+                                )
+                                .clicked()
+                            {
+                                self.git_panel.selected_file = Some(file.path.clone());
+                                self.git_panel.diff_text = read_git_diff_for_file(&repo, &file.path);
+                            }
+                            if file.staged {
+                                if ui.small_button("Unstage").clicked() {
+                                    let _ = git_unstage_file(&repo, &file.path);
+                                    self.git_panel.last_refresh = 0.0;
+                                }
+                            } else if ui.small_button("Stage").clicked() {
+                                let _ = git_stage_file(&repo, &file.path);
+                                self.git_panel.last_refresh = 0.0;
+                            }
+                        });
+                    }
+                });
+
+                ui.separator();
+                ui.label("Diff");
+                egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(&self.git_panel.diff_text)
+                            .monospace()
+                            .size(11.0),
+                    );
+                });
+
+                ui.separator();
+                ui.label("Recent commits");
+                egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
+                    for commit in &self.git_panel.commits {
+                        ui.label(
+                            egui::RichText::new(format!("{} {}", commit.hash, commit.summary))
+                                .monospace()
+                                .size(11.0),
+                        );
+                    }
+                });
+
+                ui.separator();
+                ui.label("Blame (active line)");
+                ui.label(
+                    egui::RichText::new(&self.git_panel.blame_text)
+                        .monospace()
+                        .size(11.0),
+                );
+            });
+    }
+
+    fn refresh_sidebar_files(&mut self, ctx: &egui::Context) {
+        if !self.show_sidebar {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if now - self.sidebar_last_scan < 4.0 {
+            return;
+        }
+        self.sidebar_last_scan = now;
+        let output = Command::new("rg")
+            .arg("--files")
+            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .output();
+        let mut files = Vec::new();
+        if let Ok(output) = output {
+            if output.status.success() {
+                for line in String::from_utf8_lossy(&output.stdout).lines().take(400) {
+                    files.push(PathBuf::from(line));
+                }
+            }
+        }
+        self.sidebar_files = files;
+    }
+
+    fn run_sidebar_search(&mut self) {
+        self.sidebar_search_results.clear();
+        let query = self.sidebar_search_query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let mut cmd = Command::new("rg");
+        cmd.arg("-n");
+        if self.sidebar_search_case_sensitive {
+            cmd.arg("--case-sensitive");
+        } else {
+            cmd.arg("--smart-case");
+        }
+        if !self.sidebar_search_regex {
+            cmd.arg("--fixed-strings");
+        }
+        if !self.sidebar_search_include_glob.trim().is_empty() {
+            cmd.arg("-g").arg(self.sidebar_search_include_glob.trim());
+        }
+        if !self.sidebar_search_exclude_glob.trim().is_empty() {
+            cmd.arg("-g")
+                .arg(format!("!{}", self.sidebar_search_exclude_glob.trim()));
+        }
+        let output = cmd
+            .arg(query)
+            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                self.sidebar_search_results = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .take(250)
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        }
+    }
+
+    fn update_search_preview(&mut self, hit: &str) {
+        let Some((path, rest)) = hit.split_once(':') else {
+            self.sidebar_search_preview.clear();
+            return;
+        };
+        let Some((line_str, _)) = rest.split_once(':') else {
+            self.sidebar_search_preview.clear();
+            return;
+        };
+        let line_num = line_str.parse::<usize>().unwrap_or(1).saturating_sub(1);
+        let Ok(content) = std::fs::read_to_string(path) else {
+            self.sidebar_search_preview = "Preview unavailable".to_string();
+            return;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let start = line_num.saturating_sub(2);
+        let end = (line_num + 3).min(lines.len());
+        let mut preview = String::new();
+        for idx in start..end {
+            preview.push_str(&format!("{:>4}  {}\n", idx + 1, lines[idx]));
+        }
+        self.sidebar_search_preview = preview;
+    }
+
+    fn replace_all_search_results(&mut self) {
+        self.sidebar_search_message.clear();
+        let find = self.sidebar_search_query.trim().to_string();
+        let replace = self.sidebar_replace_input.clone();
+        if find.is_empty() {
+            self.sidebar_search_message = "Search query is empty".to_string();
+            return;
+        }
+        if self.sidebar_search_regex {
+            self.sidebar_search_message = "Regex replace is not supported yet".to_string();
+            return;
+        }
+        let mut changed_files = 0usize;
+        for hit in self.sidebar_search_results.clone() {
+            if let Some((path, _)) = hit.split_once(':') {
+                let full_path = PathBuf::from(path);
+                if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    if content.contains(&find) {
+                        let replaced = content.replace(&find, &replace);
+                        if replaced != content && std::fs::write(&full_path, replaced).is_ok() {
+                            changed_files += 1;
+                        }
+                    }
+                }
+            }
+        }
+        self.sidebar_search_message = format!("Replaced in {} files", changed_files);
+        self.run_sidebar_search();
+    }
+
+    fn run_symbol_search(&mut self) {
+        self.sidebar_symbol_results.clear();
+        let query = self.sidebar_symbol_query.trim().to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+        let mut ranked: Vec<(i32, String)> = Vec::new();
+        for file in self.sidebar_files.clone() {
+            let full_path = self.workspace_join(file.to_string_lossy().as_ref());
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for (line_idx, line) in content.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if !looks_like_symbol_header(trimmed) {
+                        continue;
+                    }
+                    let line_lower = trimmed.to_lowercase();
+                    if let Some(score) = symbol_score(&line_lower, &query) {
+                        ranked.push((
+                            score,
+                            format!("{}:{}: {}", full_path.to_string_lossy(), line_idx + 1, trimmed),
+                        ));
+                    }
+                }
+            }
+        }
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        self.sidebar_symbol_results = ranked.into_iter().take(300).map(|(_, s)| s).collect();
+    }
+
+    fn open_path_in_tab(&mut self, path: &Path) {
+        if let Some((idx, _)) = self
+            .editors
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.file_path.as_deref() == Some(path))
+        {
+            self.active_tab = idx;
+            return;
+        }
+        if let Ok(editor) = Editor::from_file(path.to_path_buf()) {
+            self.editors.push(editor);
+            self.active_tab = self.editors.len().saturating_sub(1);
+        }
+    }
+
+    fn workspace_join(&self, relative_or_abs: &str) -> PathBuf {
+        let p = PathBuf::from(relative_or_abs);
+        if p.is_absolute() {
+            p
+        } else {
+            self.workspace_root.join(p)
+        }
+    }
+
+    fn create_file_or_folder(&mut self, is_folder: bool) {
+        let target = self.file_ops_target.trim();
+        if target.is_empty() {
+            self.file_ops_message = "Target path is empty".to_string();
+            return;
+        }
+        let full = self.workspace_join(target);
+        let result = if is_folder {
+            std::fs::create_dir_all(&full)
+        } else {
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&full, "")
+        };
+        self.file_ops_message = match result {
+            Ok(_) => {
+                self.sidebar_last_scan = 0.0;
+                "Created".to_string()
+            }
+            Err(err) => format!("Create failed: {err}"),
+        };
+    }
+
+    fn duplicate_active_file(&mut self) {
+        let Some(src) = self.editors[self.active_tab].file_path.clone() else {
+            self.file_ops_message = "No active file".to_string();
+            return;
+        };
+        let target = self.file_ops_target.trim();
+        if target.is_empty() {
+            self.file_ops_message = "Target path is empty".to_string();
+            return;
+        }
+        let dst = self.workspace_join(target);
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        self.file_ops_message = match std::fs::copy(src, dst) {
+            Ok(_) => {
+                self.sidebar_last_scan = 0.0;
+                "Duplicated".to_string()
+            }
+            Err(err) => format!("Duplicate failed: {err}"),
+        };
+    }
+
+    fn rename_or_move_active_file(&mut self) {
+        let Some(src) = self.editors[self.active_tab].file_path.clone() else {
+            self.file_ops_message = "No active file".to_string();
+            return;
+        };
+        let target = self.file_ops_target.trim();
+        if target.is_empty() {
+            self.file_ops_message = "Target path is empty".to_string();
+            return;
+        }
+        let dst = self.workspace_join(target);
+        if let Some(parent) = dst.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        self.file_ops_message = match std::fs::rename(&src, &dst) {
+            Ok(_) => {
+                self.editors[self.active_tab].file_path = Some(dst.clone());
+                self.editors[self.active_tab].title = dst
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string();
+                self.sidebar_last_scan = 0.0;
+                "Renamed/Moved".to_string()
+            }
+            Err(err) => format!("Rename/move failed: {err}"),
+        };
+    }
+
+    fn delete_active_file(&mut self) {
+        let Some(path) = self.editors[self.active_tab].file_path.clone() else {
+            self.file_ops_message = "No active file".to_string();
+            return;
+        };
+        self.file_ops_message = match std::fs::remove_file(path) {
+            Ok(_) => {
+                self.sidebar_last_scan = 0.0;
+                "Deleted".to_string()
+            }
+            Err(err) => format!("Delete failed: {err}"),
+        };
+    }
+
+    fn show_left_sidebar(&mut self, ui: &mut egui::Ui) {
+        if !self.show_sidebar {
+            return;
+        }
+        egui::SidePanel::left("left_sidebar")
+            .resizable(true)
+            .default_width(260.0)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Explorer, "Explorer")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Explorer;
+                    }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Search, "Search")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Search;
+                    }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Git, "Git")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Git;
+                    }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Debug, "Debug")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Debug;
+                    }
+                    if ui
+                        .selectable_label(self.sidebar_tab == SidebarTab::Collab, "Collab")
+                        .clicked()
+                    {
+                        self.sidebar_tab = SidebarTab::Collab;
+                    }
+                });
+                ui.separator();
+
+                match self.sidebar_tab {
+                    SidebarTab::Explorer => {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_open_query)
+                                .hint_text("Quick open (filter files)"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.file_ops_target)
+                                .hint_text("Target path (relative to workspace)"),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("New File").clicked() {
+                                self.create_file_or_folder(false);
+                            }
+                            if ui.button("New Folder").clicked() {
+                                self.create_file_or_folder(true);
+                            }
+                            if ui.button("Duplicate").clicked() {
+                                self.duplicate_active_file();
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            if ui.button("Rename/Move").clicked() {
+                                self.rename_or_move_active_file();
+                            }
+                            if ui.button("Delete Active").clicked() {
+                                self.delete_active_file();
+                            }
+                        });
+                        if !self.file_ops_message.is_empty() {
+                            ui.label(self.file_ops_message.clone());
+                        }
+                        let filter = self.quick_open_query.trim().to_lowercase();
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for file in self.sidebar_files.clone() {
+                                let label = file.to_string_lossy().to_string();
+                                if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
+                                    continue;
+                                }
+                                let icon = file_icon(file.as_path());
+                                if ui
+                                    .selectable_label(false, format!("{} {}", icon, label))
+                                    .clicked()
+                                {
+                                    self.open_path_in_tab(file.as_path());
+                                }
+                            }
+                        });
+                    }
+                    SidebarTab::Search => {
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.sidebar_search_query)
+                                .hint_text("Search in workspace"),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.sidebar_search_regex, "Regex");
+                            ui.checkbox(&mut self.sidebar_search_case_sensitive, "Case sensitive");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Include");
+                            ui.text_edit_singleline(&mut self.sidebar_search_include_glob);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Exclude");
+                            ui.text_edit_singleline(&mut self.sidebar_search_exclude_glob);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Replace");
+                            ui.text_edit_singleline(&mut self.sidebar_replace_input);
+                            if ui.button("Replace All").clicked() {
+                                self.replace_all_search_results();
+                            }
+                        });
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            self.run_sidebar_search();
+                        }
+                        if ui.button("Run Search").clicked() {
+                            self.run_sidebar_search();
+                        }
+                        if !self.sidebar_search_message.is_empty() {
+                            ui.label(self.sidebar_search_message.clone());
+                        }
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for hit in self.sidebar_search_results.clone() {
+                                let selected = self
+                                    .sidebar_search_selected
+                                    .as_deref()
+                                    .map(|s| s == hit.as_str())
+                                    .unwrap_or(false);
+                                if ui.selectable_label(selected, &hit).clicked() {
+                                    self.sidebar_search_selected = Some(hit.clone());
+                                    self.update_search_preview(&hit);
+                                    if let Some((path, _)) = hit.split_once(':') {
+                                        self.open_path_in_tab(Path::new(path));
+                                    }
+                                }
+                            }
+                        });
+                        if !self.sidebar_search_preview.is_empty() {
+                            ui.separator();
+                            ui.label("Preview");
+                            ui.label(
+                                egui::RichText::new(self.sidebar_search_preview.clone())
+                                    .monospace()
+                                    .size(11.0),
+                            );
+                        }
+                        ui.separator();
+                        ui.label("Symbol Search");
+                        let symbol_resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.sidebar_symbol_query)
+                                .hint_text("Search symbols (document/workspace)"),
+                        );
+                        if symbol_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            self.run_symbol_search();
+                        }
+                        if ui.button("Run Symbol Search").clicked() {
+                            self.run_symbol_search();
+                        }
+                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                            for symbol in self.sidebar_symbol_results.clone() {
+                                if ui.selectable_label(false, &symbol).clicked() {
+                                    if let Some((path, rest)) = symbol.split_once(':') {
+                                        self.open_path_in_tab(Path::new(path));
+                                        if let Some((line_str, _)) = rest.trim_start().split_once(':') {
+                                            if let Ok(line) = line_str.trim().parse::<usize>() {
+                                                self.active_editor().goto_line(line);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.label("LSP Navigation Results");
+                        egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| {
+                            for nav in self.editors[self.active_tab].lsp_nav_results.clone() {
+                                if ui.selectable_label(false, &nav).clicked() {
+                                    let cleaned = nav.trim_start_matches("file://");
+                                    let parts: Vec<&str> = cleaned.split(':').collect();
+                                    if parts.len() >= 3 {
+                                        let line = parts[parts.len() - 2].parse::<usize>().unwrap_or(1);
+                                        let path = parts[..parts.len() - 2].join(":");
+                                        self.open_path_in_tab(Path::new(&path));
+                                        self.active_editor().goto_line(line);
+                                    }
+                                }
+                            }
+                        });
+                        ui.separator();
+                        ui.label("Code Actions");
+                        let actions = self.editors[self.active_tab].code_actions.clone();
+                        for action in actions {
+                            if ui.button(&action).clicked() {
+                                let ok = self.active_editor().apply_code_action(&action);
+                                self.refactor_status = if ok {
+                                    format!("Applied: {}", action)
+                                } else {
+                                    format!("No changes: {}", action)
+                                };
+                            }
+                        }
+                    }
+                    SidebarTab::Git => {
+                        ui.label("Use the right Git panel for staging, history and diff.");
+                        if ui.button("Toggle right Git panel").clicked() {
+                            self.show_git_panel = !self.show_git_panel;
+                        }
+                    }
+                    SidebarTab::Debug => {
+                        ui.heading("Debugger");
+                        if ui.button("Toggle Breakpoint @ Cursor").clicked() {
+                            self.add_breakpoint_at_cursor();
+                        }
+                        ui.label("Breakpoints");
+                        for (path, lines) in self.debug_breakpoints.clone() {
+                            for line in lines {
+                                ui.label(format!("{}:{}", path.to_string_lossy(), line));
+                            }
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.debug_watch_input)
+                                    .hint_text("Watch expression"),
+                            );
+                            if ui.button("Add Watch").clicked() {
+                                let watch = self.debug_watch_input.trim().to_string();
+                                if !watch.is_empty() {
+                                    self.debug_watches.push(watch);
+                                    self.debug_watch_input.clear();
+                                }
+                            }
+                        });
+                        for watch in self.debug_watches.clone() {
+                            ui.label(format!("watch: {}", watch));
+                        }
+                        ui.separator();
+                        ui.label("Call Stack");
+                        for frame in self.debug_call_stack.clone() {
+                            ui.label(frame);
+                        }
+                        if ui.button("Start Debug Session").clicked() {
+                            self.active_editor().lsp_status = "Debug: session requested".to_string();
+                            self.debug_call_stack = vec![
+                                "main()".to_string(),
+                                "app::update()".to_string(),
+                                "editor_view::show()".to_string(),
+                            ];
+                        }
+                        ui.separator();
+                        ui.heading("Task Runner");
+                        for task in self.tasks.clone() {
+                            ui.horizontal(|ui| {
+                                ui.label(task.name.clone());
+                                if ui.button("Run").clicked() {
+                                    self.run_workspace_task(&task.command);
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut self.new_task_name).hint_text("task name"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_task_command)
+                                    .hint_text("task command"),
+                            );
+                        });
+                        if ui.button("Add Task").clicked() {
+                            let name = self.new_task_name.trim().to_string();
+                            let cmd = self.new_task_command.trim().to_string();
+                            if !name.is_empty() && !cmd.is_empty() {
+                                self.tasks.push(WorkspaceTask { name, command: cmd });
+                                self.new_task_name.clear();
+                                self.new_task_command.clear();
+                            }
+                        }
+                        ui.separator();
+                        ui.heading("Run Configurations");
+                        for cfg in self.run_configs.clone() {
+                            ui.horizontal(|ui| {
+                                ui.label(cfg.name.clone());
+                                if ui.button("Run").clicked() {
+                                    self.run_configuration(&cfg);
+                                }
+                            });
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_run_config_name)
+                                .hint_text("config name"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_run_config_command)
+                                .hint_text("command"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_run_config_env)
+                                .hint_text("env overrides: A=1;B=2"),
+                        );
+                        if ui.button("Add Run Configuration").clicked() {
+                            let name = self.new_run_config_name.trim().to_string();
+                            let command = self.new_run_config_command.trim().to_string();
+                            if !name.is_empty() && !command.is_empty() {
+                                self.run_configs.push(RunConfiguration {
+                                    name,
+                                    command,
+                                    env_overrides: self.new_run_config_env.trim().to_string(),
+                                });
+                                self.new_run_config_name.clear();
+                                self.new_run_config_command.clear();
+                                self.new_run_config_env.clear();
+                            }
+                        }
+                    }
+                    SidebarTab::Collab => {
+                        ui.heading("Live Share");
+                        ui.checkbox(&mut self.collab_enabled, "Enable session");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.collab_session_id)
+                                .hint_text("session id"),
+                        );
+                        if ui.button("Start/Join Session").clicked() {
+                            if self.collab_session_id.trim().is_empty() {
+                                self.collab_session_id =
+                                    format!("session-{}", (now_secs() as u64));
+                            }
+                            self.collab_enabled = true;
+                        }
+                        ui.separator();
+                        ui.label("Peer cursors");
+                        for peer in self.collab_peer_cursors.clone() {
+                            ui.label(peer);
+                        }
+                        ui.separator();
+                        ui.checkbox(&mut self.collab_review_mode, "Review mode");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.collab_note_input)
+                                .hint_text("Inline note for current line"),
+                        );
+                        if ui.button("Add Note").clicked() {
+                            if let Some(path) = self.editors[self.active_tab].file_path.clone() {
+                                let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
+                                let note = self.collab_note_input.trim().to_string();
+                                if !note.is_empty() {
+                                    self.collab_notes.entry(path).or_default().push((line, note));
+                                    self.collab_note_input.clear();
+                                }
+                            }
+                        }
+                        for (path, notes) in self.collab_notes.clone() {
+                            for (line, note) in notes {
+                                ui.label(format!(
+                                    "{}:{} {}",
+                                    path.to_string_lossy(),
+                                    line,
+                                    note
+                                ));
+                            }
+                        }
+                        if ui.button("Export Handoff Snapshot").clicked() {
+                            self.export_handoff_snapshot();
+                        }
+                    }
+                }
+            });
+    }
+
+    fn ensure_split_secondary(&mut self) {
+        if self.split_mode == SplitMode::None || self.editors.len() < 2 {
+            self.split_secondary_tab = None;
+            return;
+        }
+        if self
+            .split_secondary_tab
+            .map(|idx| idx < self.editors.len() && idx != self.active_tab)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.split_secondary_tab = (0..self.editors.len()).find(|idx| *idx != self.active_tab);
+    }
+
+    fn run_terminal_command(&mut self, secondary: bool) {
+        let command = if secondary {
+            self.terminal_input_secondary.trim().to_string()
+        } else {
+            self.terminal_input.trim().to_string()
+        };
+        if command.is_empty() {
+            return;
+        }
+        let profile = self
+            .terminal_profiles
+            .get(self.terminal_profile_idx)
+            .cloned()
+            .unwrap_or(TerminalProfile {
+                name: "Default".to_string(),
+                shell: "sh".to_string(),
+                theme_hint: "Dark".to_string(),
+            });
+        if secondary {
+            self.terminal_log_secondary
+                .push(format!("[{}] $ {}", profile.name, command));
+        } else {
+            self.terminal_log
+                .push(format!("[{}] $ {}", profile.name, command));
+        }
+        let output = Command::new(profile.shell)
+            .arg("-lc")
+            .arg(&command)
+            .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            .output();
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if !stdout.is_empty() {
+                    if secondary {
+                        self.terminal_log_secondary.push(stdout.clone());
+                    } else {
+                        self.terminal_log.push(stdout.clone());
+                    }
+                    self.output_log.push(stdout);
+                }
+                if !stderr.is_empty() {
+                    if secondary {
+                        self.terminal_log_secondary.push(stderr.clone());
+                    } else {
+                        self.terminal_log.push(stderr.clone());
+                    }
+                    self.output_log.push(stderr);
+                }
+                if self.output_log.len() > 300 {
+                    self.output_log.drain(0..(self.output_log.len() - 300));
+                }
+            }
+            Err(err) => {
+                if secondary {
+                    self.terminal_log_secondary.push(format!("error: {err}"));
+                } else {
+                    self.terminal_log.push(format!("error: {err}"));
+                }
+            }
+        }
+        if secondary {
+            self.terminal_input_secondary.clear();
+        } else {
+            self.terminal_input.clear();
+        }
+    }
+
+    fn add_breakpoint_at_cursor(&mut self) {
+        let Some(path) = self.editors[self.active_tab].file_path.clone() else {
+            self.refactor_status = "No file for breakpoint".to_string();
+            return;
+        };
+        let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
+        let set = self.debug_breakpoints.entry(path).or_default();
+        if !set.insert(line) {
+            set.remove(&line);
+        }
+    }
+
+    fn run_workspace_task(&mut self, command: &str) {
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(command)
+            .current_dir(self.workspace_root.clone())
+            .output();
+        match output {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if !stdout.trim().is_empty() {
+                    self.output_log.push(stdout);
+                }
+                if !stderr.trim().is_empty() {
+                    self.output_log.push(stderr);
+                }
+                self.output_log
+                    .push(format!("Task finished: {}", output.status.success()));
+            }
+            Err(err) => self.output_log.push(format!("Task error: {err}")),
+        }
+        if self.output_log.len() > 500 {
+            self.output_log.drain(0..(self.output_log.len() - 500));
+        }
+    }
+
+    fn run_configuration(&mut self, cfg: &RunConfiguration) {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-lc").arg(&cfg.command).current_dir(self.workspace_root.clone());
+        for pair in cfg.env_overrides.split(';') {
+            let pair = pair.trim();
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = pair.split_once('=') {
+                cmd.env(k.trim(), v.trim());
+            }
+        }
+        match cmd.output() {
+            Ok(output) => {
+                self.output_log.push(format!("Run config: {}", cfg.name));
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if !stdout.trim().is_empty() {
+                    self.output_log.push(stdout);
+                }
+                if !stderr.trim().is_empty() {
+                    self.output_log.push(stderr);
+                }
+            }
+            Err(err) => self.output_log.push(format!("Run config error: {err}")),
+        }
+        if self.output_log.len() > 500 {
+            self.output_log.drain(0..(self.output_log.len() - 500));
+        }
+    }
+
+    fn render_dock_panel_contents(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            let drag_resp = ui.add(
+                egui::Label::new(egui::RichText::new("::").monospace()).sense(egui::Sense::drag()),
+            );
+            if drag_resp.dragged() {
+                if let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) {
+                    let screen = ctx.screen_rect();
+                    if pos.x > screen.right() - screen.width() * 0.25 {
+                        self.dock_side = DockSide::Right;
+                    } else if pos.y > screen.bottom() - screen.height() * 0.25 {
+                        self.dock_side = DockSide::Bottom;
+                    }
+                }
+            }
+            if ui
+                .selectable_label(self.dock_tab == DockPanelTab::Terminal, "Terminal")
+                .clicked()
+            {
+                self.dock_tab = DockPanelTab::Terminal;
+            }
+            if ui
+                .selectable_label(self.dock_tab == DockPanelTab::Output, "Output")
+                .clicked()
+            {
+                self.dock_tab = DockPanelTab::Output;
+            }
+            if ui
+                .selectable_label(self.dock_tab == DockPanelTab::Problems, "Problems")
+                .clicked()
+            {
+                self.dock_tab = DockPanelTab::Problems;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Hide").clicked() {
+                    self.show_dock_panel = false;
+                }
+            });
+        });
+        ui.separator();
+
+        match self.dock_tab {
+            DockPanelTab::Terminal => {
+                ui.horizontal(|ui| {
+                    ui.label("Profile");
+                    for (idx, profile) in self.terminal_profiles.iter().enumerate() {
+                        if ui
+                            .selectable_label(
+                                idx == self.terminal_profile_idx,
+                                format!("{} ({})", profile.name, profile.theme_hint),
+                            )
+                            .clicked()
+                        {
+                            self.terminal_profile_idx = idx;
+                        }
+                    }
+                    ui.checkbox(&mut self.terminal_split_panes, "Split");
+                });
+                egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                    for line in &self.terminal_log {
+                        ui.label(egui::RichText::new(line).monospace().size(11.0));
+                    }
+                });
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut self.terminal_input)
+                        .hint_text("Run shell command..."),
+                );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.run_terminal_command(false);
+                }
+                if ui.button("Run").clicked() {
+                    self.run_terminal_command(false);
+                }
+                if self.terminal_split_panes {
+                    ui.separator();
+                    egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                        for line in &self.terminal_log_secondary {
+                            ui.label(egui::RichText::new(line).monospace().size(11.0));
+                        }
+                    });
+                    let resp_secondary = ui.add(
+                        egui::TextEdit::singleline(&mut self.terminal_input_secondary)
+                            .hint_text("Run in split pane..."),
+                    );
+                    if resp_secondary.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
+                        self.run_terminal_command(true);
+                    }
+                    if ui.button("Run Split").clicked() {
+                        self.run_terminal_command(true);
+                    }
+                }
+            }
+            DockPanelTab::Output => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.output_filter)
+                            .hint_text("Filter output"),
+                    );
+                    if ui.button("Copy Visible").clicked() {
+                        let visible: String = self
+                            .output_log
+                            .iter()
+                            .filter(|line| {
+                                self.output_filter.trim().is_empty()
+                                    || line
+                                        .to_lowercase()
+                                        .contains(&self.output_filter.to_lowercase())
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if let Some(cb) = self.clipboard.as_mut() {
+                            let _ = cb.set_text(&visible);
+                        }
+                    }
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for line in self.output_log.clone() {
+                        if !self.output_filter.trim().is_empty()
+                            && !line
+                                .to_lowercase()
+                                .contains(&self.output_filter.to_lowercase())
+                        {
+                            continue;
+                        }
+                        if let Some((path, line_no)) = parse_stacktrace_location(&line) {
+                            if ui
+                                .link(egui::RichText::new(&line).monospace().size(11.0))
+                                .clicked()
+                            {
+                                self.open_path_in_tab(path.as_path());
+                                self.active_editor().goto_line(line_no);
+                            }
+                        } else {
+                            ui.label(egui::RichText::new(&line).monospace().size(11.0));
+                        }
+                    }
+                });
+            }
+            DockPanelTab::Problems => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.problems_filter)
+                            .hint_text("Filter problems"),
+                    );
+                });
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let active_lang = self.active_language_label();
+                    let lang_enabled = self
+                        .diagnostics_language_enabled
+                        .get(&active_lang)
+                        .copied()
+                        .unwrap_or(true);
+                    for diag in &self.editors[self.active_tab].diagnostics {
+                        if !lang_enabled {
+                            continue;
+                        }
+                        if diag.severity <= 2 && !self.diagnostics_show_error {
+                            continue;
+                        }
+                        if diag.severity == 3 && !self.diagnostics_show_warning {
+                            continue;
+                        }
+                        if diag.severity >= 4 && !self.diagnostics_show_info {
+                            continue;
+                        }
+                        let row = format!("Ln {} [{}] {}", diag.line + 1, diag.severity, diag.message);
+                        if !self.problems_filter.trim().is_empty()
+                            && !row
+                                .to_lowercase()
+                                .contains(&self.problems_filter.to_lowercase())
+                        {
+                            continue;
+                        }
+                        ui.label(egui::RichText::new(format!(
+                            "Ln {} [{}] {}",
+                            diag.line + 1,
+                            diag.severity,
+                            diag.message
+                        )));
+                    }
+                    if self.editors[self.active_tab].diagnostics.is_empty() {
+                        ui.label("No problems");
+                    }
+                });
+            }
+        }
+    }
+
+    fn show_dock_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if !self.show_dock_panel || self.zen_mode {
+            return;
+        }
+        match self.dock_side {
+            DockSide::Bottom => {
+                egui::TopBottomPanel::bottom("dock_panel_bottom")
+                    .resizable(true)
+                    .default_height(self.dock_size.clamp(120.0, 320.0))
+                    .show_inside(ui, |ui| {
+                        self.dock_size = ui.available_height();
+                        self.render_dock_panel_contents(ui, ctx);
+                    });
+            }
+            DockSide::Right => {
+                egui::SidePanel::right("dock_panel_right")
+                    .resizable(true)
+                    .default_width(self.dock_size.clamp(220.0, 480.0))
+                    .show_inside(ui, |ui| {
+                        self.dock_size = ui.available_width();
+                        self.render_dock_panel_contents(ui, ctx);
+                    });
+            }
+        }
+    }
+
+    fn refresh_editor_insights(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        let editor = &mut self.editors[self.active_tab];
+
+        editor.code_lens_metrics = build_code_lens_metrics(editor);
+
+        if now - editor.inline_blame_last_check < 2.0 {
+            return;
+        }
+        editor.inline_blame_last_check = now;
+
+        if editor.modified {
+            return;
+        }
+
+        let Some(path) = editor.file_path.as_deref() else {
+            editor.inline_blame.clear();
+            return;
+        };
+
+        editor.inline_blame = read_inline_blame(path);
+    }
+
+    fn refresh_lsp_features(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.lsp_rx {
+            if let Ok(output) = rx.try_recv() {
+                self.lsp_rx = None;
+                if let Some(editor) = self
+                    .editors
+                    .iter_mut()
+                    .find(|e| e.file_path.as_deref() == Some(output.path.as_path()))
+                {
+                    editor.background_tasks = 0;
+                    editor.diagnostics = output
+                        .snapshot
+                        .diagnostics
+                        .into_iter()
+                        .map(|d| crate::editor::DiagnosticItem {
+                            line: d.line,
+                            severity: d.severity,
+                            message: d.message,
+                        })
+                        .collect();
+                    editor.refresh_code_actions();
+                    if output.request.want_completion {
+                        editor.completion_items = output
+                            .snapshot
+                            .completions
+                            .into_iter()
+                            .map(|item| crate::editor::CompletionItem {
+                                label: item.label,
+                                insert_text: item.insert_text,
+                                detail: item.detail,
+                                is_snippet: item.is_snippet,
+                            })
+                            .collect();
+                        editor.completion_visible = !editor.completion_items.is_empty();
+                    }
+                    if output.request.want_formatting {
+                        if let Some(formatted) = output.snapshot.formatted_text {
+                            if formatted != editor.rope.to_string() {
+                                editor.set_document_text(&formatted);
+                            }
+                        }
+                    }
+                    if output.request.want_definition {
+                        editor.lsp_nav_results = output.snapshot.definitions;
+                    }
+                    if output.request.want_references {
+                        editor.lsp_nav_results = output.snapshot.references;
+                    }
+                    if output.request.want_implementations {
+                        editor.lsp_nav_results = output.snapshot.implementations;
+                    }
+                    editor.lsp_status = if output.snapshot.had_server {
+                        "LSP: connected".to_string()
+                    } else {
+                        "LSP: snippets-only".to_string()
+                    };
+                    let error_count = editor.diagnostics.iter().filter(|d| d.severity <= 2).count();
+                    editor.notification_badges = error_count
+                        + if editor.completion_visible { 1 } else { 0 }
+                        + if editor.macro_recording { 1 } else { 0 };
+                }
+            }
+        }
+
+        if self.lsp_rx.is_some() {
+            self.editors[self.active_tab].background_tasks = 1;
+            return;
+        }
+
+        let lang = self.active_language_label();
+        let formatter = self
+            .formatter_by_language
+            .get(&lang)
+            .cloned()
+            .unwrap_or_else(|| "lsp-default".to_string());
+        let now = ctx.input(|i| i.time);
+        let editor = &mut self.editors[self.active_tab];
+        let periodic = now - editor.lsp_last_check > 3.0;
+        let should_request = periodic
+            || editor.request_completion
+            || editor.request_formatting
+            || editor.request_definition
+            || editor.request_references
+            || editor.request_implementations;
+        if !should_request {
+            editor.background_tasks = 0;
+            return;
+        }
+        if now - self.lsp_last_request < 0.5 {
+            return;
+        }
+        self.lsp_last_request = now;
+        editor.lsp_last_check = now;
+
+        let Some(path) = editor.file_path.clone() else {
+            editor.lsp_status = "LSP: no file".to_string();
+            return;
+        };
+
+        let request = RequestKind {
+            want_completion: editor.request_completion,
+            want_formatting: editor.request_formatting && formatter != "off",
+            want_definition: editor.request_definition,
+            want_references: editor.request_references,
+            want_implementations: editor.request_implementations,
+        };
+        editor.request_completion = false;
+        editor.request_formatting = false;
+        editor.request_definition = false;
+        editor.request_references = false;
+        editor.request_implementations = false;
+        let text = editor.rope.to_string();
+        let primary = editor.cursors[0].pos;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let snapshot = crate::lsp::collect_snapshot(
+                path.as_path(),
+                &text,
+                primary.line,
+                primary.col,
+                request,
+            );
+            let _ = tx.send(LspWorkerOutput {
+                path,
+                snapshot,
+                request,
+            });
+        });
+        self.lsp_rx = Some(rx);
+        editor.lsp_status = "LSP: running".to_string();
+        editor.background_tasks = 1;
+    }
+
     fn open_file(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
+            self.register_recent_workspace(path.parent().map(Path::to_path_buf));
             match Editor::from_file(path) {
                 Ok(editor) => {
                     self.editors.push(editor);
@@ -234,7 +2015,237 @@ impl LuxApp {
         }
     }
 
+    fn export_theme_json(&self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("lux-theme.json")
+            .save_file()
+        else {
+            return;
+        };
+        let json = serde_json::json!({
+            "theme_kind": self.editor_theme.name(),
+            "ui_density": self.theme_ui_density,
+            "overrides": {
+                "background": self.theme_override_bg.map(color_to_hex),
+                "text": self.theme_override_text.map(color_to_hex),
+            }
+        });
+        let _ = std::fs::write(path, json.to_string());
+    }
+
+    fn import_theme_json(&mut self) {
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return;
+        };
+        if let Some(kind) = value.get("theme_kind").and_then(|v| v.as_str()) {
+            self.editor_theme = match kind {
+                "Dark" => EditorThemeKind::Dark,
+                "Light" => EditorThemeKind::Light,
+                "Solarized Dark" => EditorThemeKind::SolarizedDark,
+                _ => EditorThemeKind::Monokai,
+            };
+        }
+        if let Some(density) = value.get("ui_density").and_then(|v| v.as_f64()) {
+            self.theme_ui_density = (density as f32).clamp(0.85, 1.35);
+        }
+        self.theme_override_bg = value
+            .get("overrides")
+            .and_then(|v| v.get("background"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_hex_color);
+        self.theme_override_text = value
+            .get("overrides")
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+            .and_then(parse_hex_color);
+    }
+
+    fn default_shortcut(&self, action: &str) -> ShortcutSpec {
+        match (self.keymap_preset, action) {
+            (_, "open") => ShortcutSpec {
+                key: egui::Key::O,
+                command: true,
+                shift: false,
+                alt: false,
+            },
+            (_, "save") => ShortcutSpec {
+                key: egui::Key::S,
+                command: true,
+                shift: false,
+                alt: false,
+            },
+            (_, "find") => ShortcutSpec {
+                key: egui::Key::F,
+                command: true,
+                shift: false,
+                alt: false,
+            },
+            (_, "format") => ShortcutSpec {
+                key: egui::Key::F,
+                command: true,
+                shift: true,
+                alt: false,
+            },
+            (KeymapPreset::JetBrains, "palette") => ShortcutSpec {
+                key: egui::Key::A,
+                command: true,
+                shift: true,
+                alt: false,
+            },
+            _ => ShortcutSpec {
+                key: egui::Key::P,
+                command: true,
+                shift: true,
+                alt: false,
+            },
+        }
+    }
+
+    fn shortcut_for_action(&self, action: &str) -> ShortcutSpec {
+        self.custom_shortcuts
+            .get(action)
+            .copied()
+            .unwrap_or_else(|| self.default_shortcut(action))
+    }
+
+    fn shortcut_pressed(ctx: &egui::Context, spec: ShortcutSpec) -> bool {
+        ctx.input(|i| {
+            i.key_pressed(spec.key)
+                && i.modifiers.command == spec.command
+                && i.modifiers.shift == spec.shift
+                && i.modifiers.alt == spec.alt
+        })
+    }
+
+    fn apply_custom_binding(&mut self, action: &str, raw: &str) {
+        if let Some(spec) = parse_shortcut(raw) {
+            self.custom_shortcuts.insert(action.to_string(), spec);
+        }
+    }
+
+    fn save_workspace_settings(&self) {
+        let workspace = self.active_workspace_key();
+        let base = self
+            .workspace_fonts
+            .get(&workspace)
+            .cloned()
+            .unwrap_or(WorkspaceFontSettings {
+                size: 13.5,
+                family: FontFamilyKind::Monospace,
+                ligatures: false,
+            });
+        let folder_overrides: Vec<serde_json::Value> = self
+            .folder_font_overrides
+            .iter()
+            .map(|(folder, font)| {
+                serde_json::json!({
+                    "folder": folder.to_string_lossy().to_string(),
+                    "size": font.size,
+                    "family": match font.family {
+                        FontFamilyKind::Monospace => "monospace",
+                        FontFamilyKind::Proportional => "proportional",
+                    },
+                    "ligatures": font.ligatures,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({
+            "font": {
+                "size": base.size,
+                "family": match base.family {
+                    FontFamilyKind::Monospace => "monospace",
+                    FontFamilyKind::Proportional => "proportional",
+                },
+                "ligatures": base.ligatures,
+            },
+            "folder_overrides": folder_overrides
+        });
+        let path = workspace.join(".lux").join("settings.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, json.to_string());
+    }
+
+    fn collab_state_path(&self) -> PathBuf {
+        self.workspace_root
+            .join(".lux")
+            .join(format!("collab-{}.json", self.collab_session_id))
+    }
+
+    fn sync_collaboration_state(&mut self) {
+        if !self.collab_enabled || self.collab_session_id.trim().is_empty() {
+            return;
+        }
+        let path = self.collab_state_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let current = &self.editors[self.active_tab];
+        let payload = serde_json::json!({
+            "session": self.collab_session_id,
+            "local": {
+                "file": current.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                "line": current.cursors.first().map(|c| c.pos.line + 1).unwrap_or(1),
+                "col": current.cursors.first().map(|c| c.pos.col + 1).unwrap_or(1),
+            }
+        });
+        let _ = std::fs::write(&path, payload.to_string());
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                let file = value
+                    .get("local")
+                    .and_then(|v| v.get("file"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let line = value
+                    .get("local")
+                    .and_then(|v| v.get("line"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                let col = value
+                    .get("local")
+                    .and_then(|v| v.get("col"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1);
+                self.collab_peer_cursors = vec![format!("peer -> {}:{}:{}", file, line, col)];
+            }
+        }
+    }
+
+    fn export_handoff_snapshot(&mut self) {
+        let path = self.workspace_root.join(".lux").join("handoff_snapshot.md");
+        let mut doc = String::new();
+        doc.push_str("# Handoff Snapshot\n\n");
+        doc.push_str(&format!("Session: {}\n\n", self.collab_session_id));
+        doc.push_str("## Open Files\n");
+        for editor in &self.editors {
+            if let Some(path) = &editor.file_path {
+                doc.push_str(&format!("- {}\n", path.to_string_lossy()));
+            }
+        }
+        doc.push_str("\n## Review Notes\n");
+        for (path, notes) in &self.collab_notes {
+            for (line, note) in notes {
+                doc.push_str(&format!("- {}:{} {}\n", path.to_string_lossy(), line, note));
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, doc);
+    }
+
     fn save_file(&mut self) {
+        if self.format_on_save {
+            self.editors[self.active_tab].request_formatting = true;
+        }
         let editor = &mut self.editors[self.active_tab];
         if editor.file_path.is_some() {
             if let Err(e) = editor.save() {
@@ -247,13 +2258,110 @@ impl LuxApp {
 
     fn save_file_as(&mut self) {
         if let Some(path) = rfd::FileDialog::new().save_file() {
+            self.register_recent_workspace(path.parent().map(Path::to_path_buf));
+            if self.format_on_save {
+                self.editors[self.active_tab].request_formatting = true;
+            }
             if let Err(e) = self.editors[self.active_tab].save_as(path) {
                 eprintln!("Failed to save: {}", e);
             }
         }
     }
 
+    fn register_recent_workspace(&mut self, maybe_path: Option<PathBuf>) {
+        let Some(path) = maybe_path else {
+            return;
+        };
+        let workspace = resolve_git_root(&path).unwrap_or(path);
+        self.recent_workspaces.retain(|p| p != &workspace);
+        self.recent_workspaces.insert(0, workspace);
+        if self.recent_workspaces.len() > 12 {
+            self.recent_workspaces.truncate(12);
+        }
+        persist_recent_workspaces(self.recent_workspaces.as_slice());
+    }
+
+    fn capture_refactor_preview(&mut self, tab_idx: usize, title: &str, before: String) {
+        let after = self.editors[tab_idx].rope.to_string();
+        if before == after {
+            self.refactor_preview = None;
+            return;
+        }
+        self.refactor_preview = Some(RefactorPreview {
+            tab_idx,
+            title: title.to_string(),
+            diff_preview: build_simple_diff_preview(&before, &after),
+            original_text: before,
+        });
+    }
+
+    fn run_autosave_and_recovery(&mut self, ctx: &egui::Context) {
+        if !self.autosave_enabled {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        if now - self.last_autosave < self.autosave_interval_sec {
+            return;
+        }
+        self.last_autosave = now;
+        for editor in &mut self.editors {
+            if editor.modified {
+                if editor.file_path.is_some() {
+                    let _ = editor.save();
+                } else {
+                    let _ = persist_recovery_snapshot(editor);
+                }
+            }
+        }
+        persist_session_snapshot(self.editors.as_slice(), self.active_tab);
+    }
+
+    fn refresh_file_watchers(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.file_watch_last_check < 2.0 {
+            return;
+        }
+        self.file_watch_last_check = now;
+
+        for (tab_idx, editor) in self.editors.iter_mut().enumerate() {
+            let Some(path) = editor.file_path.as_ref() else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(path) else {
+                continue;
+            };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let previous = self.file_mtimes.get(path).copied();
+            self.file_mtimes.insert(path.clone(), modified);
+            if let Some(prev) = previous {
+                if modified > prev && !editor.modified {
+                    if let Ok(reloaded) = Editor::from_file(path.clone()) {
+                        let cursor = editor.cursors.clone();
+                        let scroll_y = editor.scroll_y;
+                        *editor = reloaded;
+                        editor.cursors = cursor;
+                        editor.scroll_y = scroll_y;
+                    }
+                } else if modified > prev && editor.modified && self.pending_external_change.is_none()
+                {
+                    self.pending_external_change = Some(ExternalChangePrompt {
+                        tab_idx,
+                        path: path.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     fn handle_command(&mut self, cmd: CommandId) {
+        if self.telemetry_opt_in {
+            self.output_log.push(format!("telemetry.command {:?}", cmd));
+            if self.output_log.len() > 400 {
+                self.output_log.drain(0..(self.output_log.len() - 400));
+            }
+        }
         match cmd {
             CommandId::NewTab => self.new_tab(),
             CommandId::OpenFile => self.open_file(),
@@ -273,6 +2381,69 @@ impl LuxApp {
             }
             CommandId::Undo => self.active_editor().undo(),
             CommandId::Redo => self.active_editor().redo(),
+            CommandId::FormatDocument => {
+                self.active_editor().request_formatting = true;
+            }
+            CommandId::ToggleGitPanel => {
+                self.show_git_panel = !self.show_git_panel;
+            }
+            CommandId::RefreshGitPanel => {
+                self.git_panel.last_refresh = 0.0;
+            }
+            CommandId::StartDebugSession => {
+                self.active_editor().lsp_status = "Debug: session requested".to_string();
+                self.debug_call_stack = vec![
+                    "main()".to_string(),
+                    "app::update()".to_string(),
+                    "editor_view::show()".to_string(),
+                ];
+            }
+            CommandId::RunTask => {
+                if let Some(task) = self.tasks.first().cloned() {
+                    self.run_workspace_task(&task.command);
+                    self.active_editor().lsp_status =
+                        format!("Task run: {}", task.name);
+                } else {
+                    self.active_editor().lsp_status = "Task: no tasks configured".to_string();
+                }
+            }
+            CommandId::RunCustomScript => {
+                if self.plugin_sandbox_enabled {
+                    self.active_editor().lsp_status =
+                        "Script blocked (plugin sandbox enabled)".to_string();
+                } else {
+                    let output = Command::new("sh")
+                        .arg("-lc")
+                        .arg("./scripts/custom.sh")
+                        .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                        .output();
+                    self.active_editor().lsp_status = match output {
+                        Ok(o) if o.status.success() => "Script: custom.sh ok".to_string(),
+                        _ => "Script: custom.sh failed/missing".to_string(),
+                    };
+                }
+            }
+            CommandId::Extension(ext) => {
+                if let Some((provider, command_id)) = ext.split_once(':') {
+                    if let Some(plugin) = self.plugins.iter().find(|p| p.name == provider) {
+                        self.active_editor().lsp_status = match crate::plugin::run_plugin_command(
+                            plugin,
+                            command_id,
+                            self.plugin_sandbox_enabled,
+                        ) {
+                            Ok(output) if output.is_empty() => {
+                                format!("Plugin command ok: {}", command_id)
+                            }
+                            Ok(output) => format!("Plugin command ok: {} ({})", command_id, output),
+                            Err(err) => format!("Plugin command failed: {} ({})", command_id, err),
+                        };
+                    } else {
+                        self.active_editor().lsp_status = format!("Extension command: {ext}");
+                    }
+                } else {
+                    self.active_editor().lsp_status = format!("Extension command: {ext}");
+                }
+            }
         }
     }
 
@@ -303,24 +2474,37 @@ impl LuxApp {
     }
 
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let palette_spec = self.shortcut_for_action("palette");
+        let open_spec = self.shortcut_for_action("open");
+        let save_spec = self.shortcut_for_action("save");
+        let find_spec = self.shortcut_for_action("find");
+        let format_spec = self.shortcut_for_action("format");
+
         let mut should_undo = false;
         let mut should_redo = false;
         let mut should_cut = false;
         let mut should_copy = false;
         let mut should_paste = false;
         let mut should_select_all = false;
+        let mut should_format = false;
 
         ctx.input(|i| {
             let ctrl = i.modifiers.command;
             let shift = i.modifiers.shift;
+            let pressed = |spec: ShortcutSpec| {
+                i.key_pressed(spec.key)
+                    && i.modifiers.command == spec.command
+                    && i.modifiers.shift == spec.shift
+                    && i.modifiers.alt == spec.alt
+            };
 
-            if ctrl && shift && i.key_pressed(egui::Key::P) {
+            if pressed(palette_spec) {
                 self.command_palette.toggle();
             } else if ctrl && i.key_pressed(egui::Key::N) {
                 self.new_tab();
-            } else if ctrl && i.key_pressed(egui::Key::O) {
+            } else if pressed(open_spec) {
                 // Defer file dialog to avoid borrow issues
-            } else if ctrl && i.key_pressed(egui::Key::S) {
+            } else if pressed(save_spec) {
                 if shift {
                     // save as - defer
                 } else {
@@ -328,7 +2512,9 @@ impl LuxApp {
                 }
             } else if ctrl && i.key_pressed(egui::Key::W) {
                 self.close_tab();
-            } else if ctrl && i.key_pressed(egui::Key::F) {
+            } else if pressed(format_spec) {
+                    should_format = true;
+            } else if pressed(find_spec) {
                 self.show_search = !self.show_search;
                 self.show_replace = false;
                 self.show_goto_line = false;
@@ -359,9 +2545,8 @@ impl LuxApp {
         });
 
         // Handle open/save outside of input closure to avoid borrow issues
-        let should_open = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::O));
-        let should_save =
-            ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::S));
+        let should_open = Self::shortcut_pressed(ctx, open_spec);
+        let should_save = Self::shortcut_pressed(ctx, save_spec);
         let should_save_as =
             ctx.input(|i| i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::S));
 
@@ -391,6 +2576,9 @@ impl LuxApp {
         }
         if should_paste {
             self.paste();
+        }
+        if should_format {
+            self.active_editor().request_formatting = true;
         }
     }
 
@@ -427,6 +2615,17 @@ impl LuxApp {
                             self.save_file_as();
                             ui.close_menu();
                         }
+                        if !self.recent_workspaces.is_empty() {
+                            ui.separator();
+                            ui.label("Recent Workspaces");
+                            for workspace in self.recent_workspaces.clone() {
+                                let label = workspace.to_string_lossy().to_string();
+                                if ui.button(label).clicked() {
+                                    self.workspace_root = workspace;
+                                    ui.close_menu();
+                                }
+                            }
+                        }
                         ui.separator();
                         if ui.button("Close Tab\tCtrl+W").clicked() {
                             self.close_tab();
@@ -441,6 +2640,10 @@ impl LuxApp {
                         }
                         if ui.button("Redo\tCtrl+Shift+Z").clicked() {
                             self.active_editor().redo();
+                            ui.close_menu();
+                        }
+                        if ui.button("Format Document\tCtrl+Shift+F").clicked() {
+                            self.active_editor().request_formatting = true;
                             ui.close_menu();
                         }
                         ui.separator();
@@ -460,6 +2663,91 @@ impl LuxApp {
                         if ui.button("Select All\tCtrl+A").clicked() {
                             self.active_editor().select_all();
                             ui.close_menu();
+                        }
+                    });
+
+                    ui.menu_button(rich_label("Refactor"), |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.refactor_name_input)
+                                .hint_text("Name (for rename/extract)"),
+                        );
+                        if ui.button("Rename Symbol (Document)").clicked() {
+                            let tab_idx = self.active_tab;
+                            let before = self.editors[tab_idx].rope.to_string();
+                            let refactor_name = self.refactor_name_input.trim().to_string();
+                            let from = {
+                                let editor = &self.editors[self.active_tab];
+                                let selected = editor.selected_text();
+                                if selected.trim().is_empty() {
+                                    editor.symbol_at_primary_cursor()
+                                } else {
+                                    selected
+                                }
+                            };
+                            let ok = self
+                                .active_editor()
+                                .rename_symbol_in_document(from.trim(), &refactor_name);
+                            self.refactor_status = if ok {
+                                self.capture_refactor_preview(tab_idx, "Rename Symbol", before);
+                                "Rename applied".to_string()
+                            } else {
+                                "Rename not applied".to_string()
+                            };
+                            ui.close_menu();
+                        }
+                        if ui.button("Extract Variable").clicked() {
+                            let tab_idx = self.active_tab;
+                            let before = self.editors[tab_idx].rope.to_string();
+                            let refactor_name = self.refactor_name_input.trim().to_string();
+                            let ok = self.active_editor().extract_variable(&refactor_name);
+                            self.refactor_status = if ok {
+                                self.capture_refactor_preview(tab_idx, "Extract Variable", before);
+                                "Extract variable applied".to_string()
+                            } else {
+                                "Select expression and provide name".to_string()
+                            };
+                            ui.close_menu();
+                        }
+                        if ui.button("Extract Method").clicked() {
+                            let tab_idx = self.active_tab;
+                            let before = self.editors[tab_idx].rope.to_string();
+                            let refactor_name = self.refactor_name_input.trim().to_string();
+                            let ok = self.active_editor().extract_method(&refactor_name);
+                            self.refactor_status = if ok {
+                                self.capture_refactor_preview(tab_idx, "Extract Method", before);
+                                "Extract method applied".to_string()
+                            } else {
+                                "Select block and provide name".to_string()
+                            };
+                            ui.close_menu();
+                        }
+                        if ui.button("Inline Variable").clicked() {
+                            let tab_idx = self.active_tab;
+                            let before = self.editors[tab_idx].rope.to_string();
+                            let ok = self.active_editor().inline_variable_at_cursor();
+                            self.refactor_status = if ok {
+                                self.capture_refactor_preview(tab_idx, "Inline Variable", before);
+                                "Inline variable applied".to_string()
+                            } else {
+                                "Place cursor on `let name = expr;`".to_string()
+                            };
+                            ui.close_menu();
+                        }
+                        if ui.button("Organize Imports").clicked() {
+                            let tab_idx = self.active_tab;
+                            let before = self.editors[tab_idx].rope.to_string();
+                            let ok = self.active_editor().organize_imports();
+                            self.refactor_status = if ok {
+                                self.capture_refactor_preview(tab_idx, "Organize Imports", before);
+                                "Imports organized".to_string()
+                            } else {
+                                "No imports to organize".to_string()
+                            };
+                            ui.close_menu();
+                        }
+                        if !self.refactor_status.is_empty() {
+                            ui.separator();
+                            ui.label(self.refactor_status.clone());
                         }
                     });
 
@@ -490,8 +2778,86 @@ impl LuxApp {
                             self.show_search = !self.show_search;
                             ui.close_menu();
                         }
+                        if ui.selectable_label(self.show_sidebar, "Sidebar").clicked() {
+                            self.show_sidebar = !self.show_sidebar;
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.show_dock_panel, "Terminal/Output Panel").clicked() {
+                            self.show_dock_panel = !self.show_dock_panel;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui
+                            .selectable_label(self.split_mode == SplitMode::Vertical, "Split Vertical")
+                            .clicked()
+                        {
+                            self.split_mode = if self.split_mode == SplitMode::Vertical {
+                                SplitMode::None
+                            } else {
+                                SplitMode::Vertical
+                            };
+                            self.ensure_split_secondary();
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(
+                                self.split_mode == SplitMode::Horizontal,
+                                "Split Horizontal",
+                            )
+                            .clicked()
+                        {
+                            self.split_mode = if self.split_mode == SplitMode::Horizontal {
+                                SplitMode::None
+                            } else {
+                                SplitMode::Horizontal
+                            };
+                            self.ensure_split_secondary();
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.zen_mode, "Zen Mode").clicked() {
+                            self.zen_mode = !self.zen_mode;
+                            if self.zen_mode {
+                                self.focus_mode = true;
+                                self.show_sidebar = false;
+                                self.show_git_panel = false;
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.selectable_label(self.focus_mode, "Focus Mode").clicked() {
+                            self.focus_mode = !self.focus_mode;
+                            if self.focus_mode {
+                                self.show_sidebar = false;
+                                self.show_git_panel = false;
+                            }
+                            ui.close_menu();
+                        }
                         if ui.button("Toggle Go To Line").clicked() {
                             self.show_goto_line = !self.show_goto_line;
+                            ui.close_menu();
+                        }
+                        if ui
+                            .selectable_label(self.show_git_panel, "Git Panel")
+                            .clicked()
+                        {
+                            self.show_git_panel = !self.show_git_panel;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Preset: Coding").clicked() {
+                            self.show_sidebar = true;
+                            self.show_git_panel = true;
+                            self.split_mode = SplitMode::Vertical;
+                            self.zen_mode = false;
+                            self.focus_mode = false;
+                            self.ensure_split_secondary();
+                            ui.close_menu();
+                        }
+                        if ui.button("Preset: Writing").clicked() {
+                            self.show_sidebar = false;
+                            self.show_git_panel = false;
+                            self.split_mode = SplitMode::None;
+                            self.zen_mode = true;
+                            self.focus_mode = true;
                             ui.close_menu();
                         }
                         ui.separator();
@@ -551,6 +2917,254 @@ impl LuxApp {
                             if ui.selectable_label(selected, label).clicked() {
                                 self.editor_theme = theme_option;
                                 ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        if ui.button("Export Theme JSON").clicked() {
+                            self.export_theme_json();
+                            ui.close_menu();
+                        }
+                        if ui.button("Import Theme JSON").clicked() {
+                            self.import_theme_json();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label("UI Density");
+                        ui.add(egui::Slider::new(&mut self.theme_ui_density, 0.85..=1.35).text("scale"));
+                        ui.separator();
+                        ui.label("Color Overrides");
+                        let mut bg = self.theme_override_bg.unwrap_or(egui::Color32::from_rgb(39, 40, 34));
+                        let mut text = self.theme_override_text.unwrap_or(egui::Color32::from_rgb(248, 248, 242));
+                        ui.horizontal(|ui| {
+                            ui.label("Background");
+                            ui.color_edit_button_srgba(&mut bg);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Text");
+                            ui.color_edit_button_srgba(&mut text);
+                        });
+                        self.theme_override_bg = Some(bg);
+                        self.theme_override_text = Some(text);
+                        if ui.button("Clear Overrides").clicked() {
+                            self.theme_override_bg = None;
+                            self.theme_override_text = None;
+                        }
+                        ui.separator();
+                        ui.label("Workspace Font");
+                        let workspace_root = self.workspace_root.clone();
+                        let workspace = self.active_workspace_key();
+                        let entry = self
+                            .workspace_fonts
+                            .entry(workspace)
+                            .or_insert(WorkspaceFontSettings {
+                                size: 13.5,
+                                family: FontFamilyKind::Monospace,
+                                ligatures: false,
+                            });
+                        ui.add(egui::Slider::new(&mut entry.size, 10.0..=24.0).text("Font Size"));
+                        ui.horizontal(|ui| {
+                            ui.label("Family");
+                            ui.selectable_value(&mut entry.family, FontFamilyKind::Monospace, "Monospace");
+                            ui.selectable_value(
+                                &mut entry.family,
+                                FontFamilyKind::Proportional,
+                                "Proportional",
+                            );
+                        });
+                        ui.checkbox(&mut entry.ligatures, "Ligatures");
+                        ui.separator();
+                        ui.label("Per-folder override");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.folder_override_path_input)
+                                .hint_text("folder path (relative or absolute)"),
+                        );
+                        if ui.button("Apply override from current font").clicked() {
+                            let relative = PathBuf::from(self.folder_override_path_input.trim());
+                            let folder = if relative.is_absolute() {
+                                relative
+                            } else {
+                                workspace_root.join(relative)
+                            };
+                            self.folder_font_overrides.insert(folder, entry.clone());
+                        }
+                        if ui.button("Remove override").clicked() {
+                            let relative = PathBuf::from(self.folder_override_path_input.trim());
+                            let folder = if relative.is_absolute() {
+                                relative
+                            } else {
+                                workspace_root.join(relative)
+                            };
+                            self.folder_font_overrides.remove(&folder);
+                        }
+                        if ui.button("Save Workspace Settings").clicked() {
+                            self.save_workspace_settings();
+                        }
+                    });
+
+                    ui.menu_button(rich_label("Keymap"), |ui| {
+                        ui.label("Preset");
+                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::Vscode, "VSCode");
+                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::Sublime, "Sublime");
+                        ui.selectable_value(&mut self.keymap_preset, KeymapPreset::JetBrains, "JetBrains");
+                        ui.separator();
+                        ui.label("Custom bindings (e.g. Cmd+Shift+P)");
+                        ui.horizontal(|ui| {
+                            ui.label("Palette");
+                            ui.text_edit_singleline(&mut self.binding_palette);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Open");
+                            ui.text_edit_singleline(&mut self.binding_open);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Save");
+                            ui.text_edit_singleline(&mut self.binding_save);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Find");
+                            ui.text_edit_singleline(&mut self.binding_find);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Format");
+                            ui.text_edit_singleline(&mut self.binding_format);
+                        });
+                        if ui.button("Apply Custom Bindings").clicked() {
+                            let palette = self.binding_palette.clone();
+                            let open = self.binding_open.clone();
+                            let save = self.binding_save.clone();
+                            let find = self.binding_find.clone();
+                            let format = self.binding_format.clone();
+                            self.apply_custom_binding("palette", &palette);
+                            self.apply_custom_binding("open", &open);
+                            self.apply_custom_binding("save", &save);
+                            self.apply_custom_binding("find", &find);
+                            self.apply_custom_binding("format", &format);
+                        }
+                        if ui.button("Clear Custom Bindings").clicked() {
+                            self.custom_shortcuts.clear();
+                        }
+                    });
+
+                    ui.menu_button(rich_label("Platform"), |ui| {
+                        ui.checkbox(&mut self.telemetry_opt_in, "Telemetry Opt-in");
+                        ui.checkbox(&mut self.plugin_sandbox_enabled, "Plugin Sandbox Enabled");
+                        ui.label(format!("Loaded plugins: {}", self.plugins.len()));
+                        let syntax_count: usize = self.plugins.iter().map(|p| p.syntax_packages.len()).sum();
+                        let formatter_count: usize = self.plugins.iter().map(|p| p.formatters.len()).sum();
+                        let task_count: usize = self.plugins.iter().map(|p| p.tasks.len()).sum();
+                        let keymap_count: usize = self.plugins.iter().map(|p| p.keymaps.len()).sum();
+                        let script_count: usize = self.plugins.iter().map(|p| p.scripts.len()).sum();
+                        ui.label(format!(
+                            "Contribs syntax:{} formatters:{} tasks:{} keymaps:{} scripts:{}",
+                            syntax_count, formatter_count, task_count, keymap_count, script_count
+                        ));
+                        ui.separator();
+                        ui.label("Marketplace / Registry");
+                        if ui.button("Reload Registry").clicked() {
+                            self.registry_entries = crate::plugin::load_registry(&self.workspace_root);
+                        }
+                        for entry in self.registry_entries.clone() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("{} ({})", entry.name, entry.id));
+                                if ui.button("Install/Update").clicked() {
+                                    self.marketplace_status =
+                                        match crate::plugin::install_or_update_registry_plugin(
+                                            &self.workspace_root,
+                                            &entry,
+                                        ) {
+                                            Ok(_) => "Plugin installed/updated".to_string(),
+                                            Err(err) => format!("Install failed: {err}"),
+                                        };
+                                    self.plugins = crate::plugin::load_plugin_manifests(&self.workspace_root);
+                                    for plugin in &self.plugins {
+                                        let tuples: Vec<(String, String, String)> = plugin
+                                            .commands
+                                            .iter()
+                                            .map(|cmd| {
+                                                (
+                                                    cmd.title.clone(),
+                                                    cmd.shortcut.clone(),
+                                                    cmd.id.clone(),
+                                                )
+                                            })
+                                            .collect();
+                                        self.command_palette.register_extension_commands(
+                                            plugin.name.as_str(),
+                                            tuples.iter().map(|(title, shortcut, id)| {
+                                                (title.as_str(), shortcut.as_str(), id.as_str())
+                                            }),
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                        if !self.marketplace_status.is_empty() {
+                            ui.label(self.marketplace_status.clone());
+                        }
+                        ui.separator();
+                        ui.label("Update Channel");
+                        ui.selectable_value(&mut self.update_channel, UpdateChannel::Stable, "Stable");
+                        ui.selectable_value(&mut self.update_channel, UpdateChannel::Beta, "Beta");
+                        ui.selectable_value(&mut self.update_channel, UpdateChannel::Nightly, "Nightly");
+                    });
+
+                    ui.menu_button(rich_label("Diagnostics"), |ui| {
+                        ui.checkbox(&mut self.diagnostics_show_error, "Show Errors");
+                        ui.checkbox(&mut self.diagnostics_show_warning, "Show Warnings");
+                        ui.checkbox(&mut self.diagnostics_show_info, "Show Info");
+                        ui.separator();
+                        let active_lang = self.active_language_label();
+                        let enabled = self
+                            .diagnostics_language_enabled
+                            .entry(active_lang.clone())
+                            .or_insert(true);
+                        ui.checkbox(enabled, format!("Diagnostics enabled for {}", active_lang));
+                        ui.separator();
+                        ui.checkbox(&mut self.format_on_save, "Format On Save");
+                        ui.checkbox(&mut self.format_on_type, "Format On Type");
+                        let formatter = self
+                            .formatter_by_language
+                            .entry(active_lang.clone())
+                            .or_insert("lsp-default".to_string());
+                        ui.horizontal(|ui| {
+                            ui.label("Formatter");
+                            ui.text_edit_singleline(formatter);
+                        });
+                        ui.separator();
+                        ui.label("Lint Workspace Override");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.lint_override_rule_input)
+                                    .hint_text("rule"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.lint_override_value_input)
+                                    .hint_text("value"),
+                            );
+                        });
+                        if ui.button("Set Workspace Override").clicked() {
+                            let rule = self.lint_override_rule_input.trim().to_string();
+                            let value = self.lint_override_value_input.trim().to_string();
+                            if !rule.is_empty() && !value.is_empty() {
+                                self.lint_workspace_overrides.insert(rule, value);
+                            }
+                        }
+                        if ui.button("Set Folder Override (active file folder)").clicked() {
+                            let rule = self.lint_override_rule_input.trim().to_string();
+                            let value = self.lint_override_value_input.trim().to_string();
+                            if !rule.is_empty() && !value.is_empty() {
+                                if let Some(folder) = self
+                                    .editors
+                                    .get(self.active_tab)
+                                    .and_then(|e| e.file_path.as_ref())
+                                    .and_then(|p| p.parent())
+                                    .map(Path::to_path_buf)
+                                {
+                                    self.lint_folder_overrides
+                                        .entry(folder)
+                                        .or_default()
+                                        .insert(rule, value);
+                                }
                             }
                         }
                     });
@@ -1016,8 +3630,32 @@ impl eframe::App for LuxApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Dark theme
         ctx.set_visuals(egui::Visuals::dark());
+        let native_scale = ctx.native_pixels_per_point().unwrap_or(1.0);
+        ctx.set_pixels_per_point((native_scale * self.theme_ui_density).clamp(0.75, 4.0));
+
+        if self.format_on_type {
+            let now = now_secs();
+            let editor = &mut self.editors[self.active_tab];
+            if editor.modified && editor.last_edit_time > 0.0 && now - editor.last_edit_time > 0.6 {
+                editor.request_formatting = true;
+            }
+        }
+        let active_lang = self.active_language_label();
+        self.diagnostics_language_enabled
+            .entry(active_lang)
+            .or_insert(true);
 
         self.update_git_info(ctx);
+        self.refresh_editor_insights(ctx);
+        self.refresh_lsp_features(ctx);
+        self.editors[self.active_tab].refresh_code_actions();
+        self.refresh_file_watchers(ctx);
+        self.run_autosave_and_recovery(ctx);
+        self.sync_collaboration_state();
+        if self.show_git_panel {
+            self.refresh_git_panel_data(ctx);
+        }
+        self.refresh_sidebar_files(ctx);
 
         // Global shortcuts (handled before UI to avoid conflicts)
         if !self.command_palette.visible {
@@ -1026,11 +3664,13 @@ impl eframe::App for LuxApp {
 
         // Command palette (rendered as overlay)
         if let Some(cmd) = self.command_palette.show(ctx) {
-            self.command_palette.register_use(cmd);
+            self.command_palette.register_use(cmd.clone());
             self.handle_command(cmd);
         }
 
-        self.show_menu_bar(ctx);
+        if !self.zen_mode {
+            self.show_menu_bar(ctx);
+        }
 
         // Main panel
         egui::CentralPanel::default()
@@ -1040,20 +3680,23 @@ impl eframe::App for LuxApp {
                     .inner_margin(egui::Margin::same(0.0)),
             )
             .show(ctx, |ui| {
-                // Tab bar
-                self.show_tab_bar(ui);
+                if !self.focus_mode {
+                    self.show_left_sidebar(ui);
+                    self.show_git_panel_ui(ui);
+                }
+                self.show_dock_panel(ui, ctx);
 
-                // Breadcrumbs
-                self.show_breadcrumbs(ui);
-
-                // Search / goto line bar
-                self.show_search_bar(ui);
-                self.show_goto_line_bar(ui);
+                if !self.zen_mode {
+                    self.show_tab_bar(ui);
+                    self.show_breadcrumbs(ui);
+                    self.show_search_bar(ui);
+                    self.show_goto_line_bar(ui);
+                }
 
                 ui.add_space(0.0);
 
                 // Editor area (takes remaining space minus status bar)
-                let status_bar_height = 24.0;
+                let status_bar_height = if self.zen_mode { 0.0 } else { 24.0 };
                 let available = ui.available_rect_before_wrap();
                 let editor_rect = egui::Rect::from_min_max(
                     available.min,
@@ -1074,18 +3717,97 @@ impl eframe::App for LuxApp {
                     && !self.show_goto_line
                     && !self.command_palette.visible
                     && self.confirm_close_tab.is_none();
-                let editor_theme = self.editor_theme.palette();
-                let search_query = if self.search_input.trim().is_empty() {
+                let mut editor_theme = self.editor_theme.palette();
+                if let Some(bg) = self.theme_override_bg {
+                    editor_theme.background = bg;
+                    editor_theme.gutter_bg = bg;
+                }
+                if let Some(text) = self.theme_override_text {
+                    editor_theme.text = text;
+                    editor_theme.cursor = text;
+                }
+                let font_settings = self.current_font_settings();
+                let search_query_owned = if self.search_input.trim().is_empty() {
                     None
                 } else {
-                    Some(self.search_input.as_str())
+                    Some(self.search_input.clone())
                 };
+                let search_query = search_query_owned.as_deref();
 
                 let min_editor_width = 360.0;
                 let min_preview_width = 260.0;
                 let can_split = editor_rect.width() > (min_editor_width + min_preview_width);
 
-                if show_preview && can_split {
+                self.ensure_split_secondary();
+                if let Some(secondary_idx) = self.split_secondary_tab {
+                    if self.split_mode != SplitMode::None && secondary_idx < self.editors.len() && secondary_idx != self.active_tab {
+                        let (first_rect, second_rect) = if self.split_mode == SplitMode::Vertical {
+                            let w = editor_rect.width() / 2.0;
+                            (
+                                egui::Rect::from_min_max(
+                                    editor_rect.min,
+                                    egui::Pos2::new(editor_rect.min.x + w - 1.0, editor_rect.max.y),
+                                ),
+                                egui::Rect::from_min_max(
+                                    egui::Pos2::new(editor_rect.min.x + w + 1.0, editor_rect.min.y),
+                                    editor_rect.max,
+                                ),
+                            )
+                        } else {
+                            let h = editor_rect.height() / 2.0;
+                            (
+                                egui::Rect::from_min_max(
+                                    editor_rect.min,
+                                    egui::Pos2::new(editor_rect.max.x, editor_rect.min.y + h - 1.0),
+                                ),
+                                egui::Rect::from_min_max(
+                                    egui::Pos2::new(editor_rect.min.x, editor_rect.min.y + h + 1.0),
+                                    editor_rect.max,
+                                ),
+                            )
+                        };
+                        let active_idx = self.active_tab;
+                        let (editors, clipboard, highlighter) =
+                            (&mut self.editors, &mut self.clipboard, &self.highlighter);
+                        let (first_editor, second_editor) = if active_idx < secondary_idx {
+                            let (left, right) = editors.split_at_mut(secondary_idx);
+                            (&mut left[active_idx], &mut right[0])
+                        } else {
+                            let (left, right) = editors.split_at_mut(active_idx);
+                            (&mut right[0], &mut left[secondary_idx])
+                        };
+                        let mut first_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(first_rect)
+                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                        );
+                        crate::ui::editor_view::show(
+                            &mut first_ui,
+                            first_editor,
+                            clipboard,
+                            highlighter,
+                            &editor_theme,
+                            &font_settings,
+                            search_query,
+                            auto_focus,
+                        );
+                        let mut second_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(second_rect)
+                                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                        );
+                        crate::ui::editor_view::show(
+                            &mut second_ui,
+                            second_editor,
+                            clipboard,
+                            highlighter,
+                            &editor_theme,
+                            &font_settings,
+                            search_query,
+                            false,
+                        );
+                    }
+                } else if show_preview && can_split {
                     let preview_width = (editor_rect.width() * 0.42)
                         .clamp(min_preview_width, editor_rect.width() - min_editor_width);
                     let editor_width = editor_rect.width() - preview_width;
@@ -1119,6 +3841,7 @@ impl eframe::App for LuxApp {
                         &mut self.clipboard,
                         &self.highlighter,
                         &editor_theme,
+                        &font_settings,
                         search_query,
                         auto_focus,
                     );
@@ -1143,18 +3866,20 @@ impl eframe::App for LuxApp {
                         &mut self.clipboard,
                         &self.highlighter,
                         &editor_theme,
+                        &font_settings,
                         search_query,
                         auto_focus,
                     );
                 }
 
-                // Status bar
-                crate::ui::status_bar::show(
-                    ui,
-                    &mut self.editors[self.active_tab],
-                    self.git_info.as_ref(),
-                    &self.highlighter,
-                );
+                if !self.zen_mode {
+                    crate::ui::status_bar::show(
+                        ui,
+                        &mut self.editors[self.active_tab],
+                        self.git_info.as_ref(),
+                        &self.highlighter,
+                    );
+                }
             });
 
         // Unsaved changes confirmation dialog
@@ -1206,6 +3931,73 @@ impl eframe::App for LuxApp {
             }
         }
 
+        if let Some(prompt) = self.pending_external_change.clone() {
+            let mut decision: Option<bool> = None;
+            egui::Window::new("External File Change")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "The file changed on disk:\n{}\nReload from disk?",
+                        prompt.path.to_string_lossy()
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Reload Disk Version").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Keep Buffer").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            if let Some(reload) = decision {
+                if reload {
+                    if prompt.tab_idx < self.editors.len() {
+                        if let Ok(reloaded) = Editor::from_file(prompt.path.clone()) {
+                            self.editors[prompt.tab_idx] = reloaded;
+                        }
+                    }
+                }
+                self.pending_external_change = None;
+            }
+        }
+
+        if let Some(preview) = self.refactor_preview.clone() {
+            let mut close = false;
+            let mut rollback = false;
+            egui::Window::new(format!("Refactor Preview: {}", preview.title))
+                .resizable(true)
+                .default_size([720.0, 420.0])
+                .show(ctx, |ui| {
+                    ui.label("Diff preview (simplified):");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(preview.diff_preview.clone())
+                                .monospace()
+                                .size(11.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Keep Changes").clicked() {
+                            close = true;
+                        }
+                        if ui.button("Rollback File").clicked() {
+                            rollback = true;
+                            close = true;
+                        }
+                    });
+                });
+            if rollback && preview.tab_idx < self.editors.len() {
+                self.editors[preview.tab_idx].set_document_text(&preview.original_text);
+                self.refactor_status = "Refactor rolled back".to_string();
+            }
+            if close {
+                self.refactor_preview = None;
+            }
+        }
+
         ctx.request_repaint();
     }
 }
@@ -1235,6 +4027,206 @@ fn find_drop_target(
         }
     }
     best.map(|(idx, _)| idx).filter(|idx| *idx != dragging_idx)
+}
+
+fn resolve_git_root(cwd: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+fn read_git_files(repo: &Path) -> Vec<GitChangedFile> {
+    let output = match Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(repo)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let index_status = line.chars().next().unwrap_or(' ');
+        let worktree_status = line.chars().nth(1).unwrap_or(' ');
+        let path = line[3..].to_string();
+        let status = format!("{}{}", index_status, worktree_status);
+        out.push(GitChangedFile {
+            path,
+            status,
+            staged: index_status != ' ',
+        });
+    }
+    out
+}
+
+fn read_git_commits(repo: &Path) -> Vec<GitCommitEntry> {
+    let output = match Command::new("git")
+        .arg("log")
+        .arg("-n")
+        .arg("20")
+        .arg("--pretty=format:%h\t%s")
+        .current_dir(repo)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (hash, summary) = line.split_once('\t')?;
+            Some(GitCommitEntry {
+                hash: hash.to_string(),
+                summary: summary.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn read_git_diff_for_file(repo: &Path, file: &str) -> String {
+    let output = Command::new("git")
+        .arg("diff")
+        .arg("--")
+        .arg(file)
+        .current_dir(repo)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).to_string(),
+        _ => String::new(),
+    }
+}
+
+fn read_active_line_blame(repo: &Path, editor: &Editor) -> String {
+    let Some(path) = editor.file_path.as_ref() else {
+        return "No file".to_string();
+    };
+    let Ok(relative) = path.strip_prefix(repo) else {
+        return "Not in repo".to_string();
+    };
+    let line = editor.cursors.first().map(|c| c.pos.line + 1).unwrap_or(1);
+    let output = Command::new("git")
+        .arg("blame")
+        .arg("-L")
+        .arg(format!("{line},{line}"))
+        .arg("--")
+        .arg(relative)
+        .current_dir(repo)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        _ => "Blame unavailable".to_string(),
+    }
+}
+
+fn git_stage_file(repo: &Path, file: &str) -> bool {
+    Command::new("git")
+        .arg("add")
+        .arg("--")
+        .arg(file)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_unstage_file(repo: &Path, file: &str) -> bool {
+    Command::new("git")
+        .arg("reset")
+        .arg("HEAD")
+        .arg("--")
+        .arg(file)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_commit(repo: &Path, message: &str) -> bool {
+    Command::new("git")
+        .arg("commit")
+        .arg("-m")
+        .arg(message)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_checkout_branch(repo: &Path, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    Command::new("git")
+        .arg("checkout")
+        .arg(branch)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_merge_branch(repo: &Path, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    Command::new("git")
+        .arg("merge")
+        .arg(branch)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_rebase_branch(repo: &Path, branch: &str) -> bool {
+    if branch.is_empty() {
+        return false;
+    }
+    Command::new("git")
+        .arg("rebase")
+        .arg(branch)
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_stash_push(repo: &Path, message: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.arg("stash").arg("push");
+    if !message.is_empty() {
+        cmd.arg("-m").arg(message);
+    }
+    cmd.current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn git_stash_pop(repo: &Path) -> bool {
+    Command::new("git")
+        .arg("stash")
+        .arg("pop")
+        .current_dir(repo)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn read_git_info(cwd: Option<&Path>) -> Option<crate::ui::status_bar::GitInfo> {
@@ -1294,4 +4286,457 @@ fn read_git_info(cwd: Option<&Path>) -> Option<crate::ui::status_bar::GitInfo> {
         behind,
         dirty,
     })
+}
+
+fn read_inline_blame(path: &Path) -> Vec<InlineBlameEntry> {
+    let cwd = match path.parent() {
+        Some(parent) => parent,
+        None => return Vec::new(),
+    };
+
+    let mut cmd = Command::new("git");
+    cmd.arg("blame")
+        .arg("--line-porcelain")
+        .arg("--")
+        .arg(path)
+        .current_dir(cwd);
+    let output = match cmd.output() {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let mut lines = Vec::new();
+    let mut commit_short = String::new();
+    let mut author = String::new();
+    let mut summary = String::new();
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.starts_with('\t') {
+            lines.push(InlineBlameEntry {
+                commit_short: commit_short.clone(),
+                author: author.clone(),
+                summary: summary.clone(),
+            });
+            continue;
+        }
+
+        if let Some((head, _)) = line.split_once(' ') {
+            if head.len() >= 8 && head.chars().all(|c| c.is_ascii_hexdigit()) {
+                commit_short = if head.starts_with("00000000") {
+                    "working".to_string()
+                } else {
+                    head.chars().take(8).collect()
+                };
+                author.clear();
+                summary.clear();
+                continue;
+            }
+        }
+
+        if let Some(value) = line.strip_prefix("author ") {
+            author = value.to_string();
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("summary ") {
+            summary = value.to_string();
+        }
+    }
+
+    lines
+}
+
+fn build_code_lens_metrics(editor: &Editor) -> Vec<CodeLensMetric> {
+    let line_count = editor.line_count();
+    if line_count == 0 {
+        return Vec::new();
+    }
+
+    let mut symbol_lines = Vec::new();
+    for line_idx in 0..line_count {
+        let trimmed = editor.line_text(line_idx).trim().to_string();
+        if looks_like_symbol_header(&trimmed) {
+            symbol_lines.push(line_idx);
+        }
+    }
+
+    if symbol_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut metrics = Vec::with_capacity(symbol_lines.len());
+    for (idx, start_line) in symbol_lines.iter().enumerate() {
+        let end_line = symbol_lines
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(line_count)
+            .max(*start_line + 1);
+        let span = end_line - *start_line;
+        let mut non_empty = 0usize;
+        let mut todo_count = 0usize;
+
+        for line in *start_line..end_line {
+            let text = editor.line_text(line);
+            if !text.trim().is_empty() {
+                non_empty += 1;
+            }
+            if text.contains("TODO") || text.contains("FIXME") {
+                todo_count += 1;
+            }
+        }
+
+        let mut label = format!("{span} lines • {non_empty} non-empty");
+        if todo_count > 0 {
+            label.push_str(&format!(" • {todo_count} todo"));
+        }
+        metrics.push(CodeLensMetric {
+            line: *start_line,
+            label,
+        });
+    }
+
+    metrics
+}
+
+fn looks_like_symbol_header(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+
+    let prefixes = [
+        "fn ",
+        "pub fn ",
+        "async fn ",
+        "pub async fn ",
+        "def ",
+        "class ",
+        "function ",
+        "struct ",
+        "enum ",
+        "impl ",
+    ];
+    prefixes.iter().any(|prefix| line.starts_with(prefix))
+}
+
+fn color_to_hex(color: egui::Color32) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b())
+}
+
+fn parse_hex_color(hex: &str) -> Option<egui::Color32> {
+    let stripped = hex.trim().trim_start_matches('#');
+    if stripped.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&stripped[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&stripped[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&stripped[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
+fn parse_shortcut(raw: &str) -> Option<ShortcutSpec> {
+    let mut command = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut key = None;
+    for part in raw.split('+').map(|s| s.trim().to_lowercase()) {
+        match part.as_str() {
+            "cmd" | "ctrl" | "control" => command = true,
+            "shift" => shift = true,
+            "alt" | "option" => alt = true,
+            "a" => key = Some(egui::Key::A),
+            "b" => key = Some(egui::Key::B),
+            "c" => key = Some(egui::Key::C),
+            "d" => key = Some(egui::Key::D),
+            "e" => key = Some(egui::Key::E),
+            "f" => key = Some(egui::Key::F),
+            "g" => key = Some(egui::Key::G),
+            "h" => key = Some(egui::Key::H),
+            "i" => key = Some(egui::Key::I),
+            "j" => key = Some(egui::Key::J),
+            "k" => key = Some(egui::Key::K),
+            "l" => key = Some(egui::Key::L),
+            "m" => key = Some(egui::Key::M),
+            "n" => key = Some(egui::Key::N),
+            "o" => key = Some(egui::Key::O),
+            "p" => key = Some(egui::Key::P),
+            "q" => key = Some(egui::Key::Q),
+            "r" => key = Some(egui::Key::R),
+            "s" => key = Some(egui::Key::S),
+            "t" => key = Some(egui::Key::T),
+            "u" => key = Some(egui::Key::U),
+            "v" => key = Some(egui::Key::V),
+            "w" => key = Some(egui::Key::W),
+            "x" => key = Some(egui::Key::X),
+            "y" => key = Some(egui::Key::Y),
+            "z" => key = Some(egui::Key::Z),
+            _ => {}
+        }
+    }
+    Some(ShortcutSpec {
+        key: key?,
+        command,
+        shift,
+        alt,
+    })
+}
+
+fn session_file_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".lux")
+        .join("session.json")
+}
+
+fn recovery_dir_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".lux")
+        .join("recovery")
+}
+
+fn persist_session_snapshot(editors: &[Editor], active_tab: usize) {
+    let path = session_file_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let files: Vec<String> = editors
+        .iter()
+        .filter_map(|e| e.file_path.as_ref())
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let json = serde_json::json!({
+        "files": files,
+        "active_tab": active_tab,
+    });
+    let _ = std::fs::write(path, json.to_string());
+}
+
+fn load_session_editors() -> Option<(Vec<Editor>, usize)> {
+    let path = session_file_path();
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let files = value.get("files")?.as_array()?;
+    let mut editors = Vec::new();
+    for file in files {
+        let Some(path_str) = file.as_str() else {
+            continue;
+        };
+        if let Ok(editor) = Editor::from_file(PathBuf::from(path_str)) {
+            editors.push(editor);
+        }
+    }
+    if editors.is_empty() {
+        return None;
+    }
+    let active = value
+        .get("active_tab")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(0)
+        .min(editors.len().saturating_sub(1));
+    Some((editors, active))
+}
+
+fn persist_recovery_snapshot(editor: &Editor) -> std::io::Result<()> {
+    let dir = recovery_dir_path();
+    std::fs::create_dir_all(&dir)?;
+    let name = format!(
+        "untitled-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+    std::fs::write(dir.join(name), editor.rope.to_string())
+}
+
+fn recent_workspaces_path() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".lux")
+        .join("recent_workspaces.json")
+}
+
+fn load_recent_workspaces() -> Vec<PathBuf> {
+    let path = recent_workspaces_path();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("workspaces")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn persist_recent_workspaces(workspaces: &[PathBuf]) {
+    let path = recent_workspaces_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let list: Vec<String> = workspaces
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    let json = serde_json::json!({ "workspaces": list });
+    let _ = std::fs::write(path, json.to_string());
+}
+
+fn file_icon(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "rs" => "[RS]",
+        "py" => "[PY]",
+        "js" | "ts" | "tsx" | "jsx" => "[JS]",
+        "md" => "[MD]",
+        "json" | "toml" | "yaml" | "yml" => "[CFG]",
+        "sh" | "bash" | "zsh" => "[SH]",
+        "html" | "css" => "[WEB]",
+        _ => "[FILE]",
+    }
+}
+
+fn load_workspace_settings(workspace: &Path) -> (WorkspaceFontSettings, HashMap<PathBuf, WorkspaceFontSettings>) {
+    let mut base = WorkspaceFontSettings {
+        size: 13.5,
+        family: FontFamilyKind::Monospace,
+        ligatures: false,
+    };
+    let mut overrides = HashMap::new();
+    let path = workspace.join(".lux").join("settings.json");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (base, overrides);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (base, overrides);
+    };
+    if let Some(font) = value.get("font") {
+        if let Some(size) = font.get("size").and_then(|v| v.as_f64()) {
+            base.size = size as f32;
+        }
+        if let Some(family) = font.get("family").and_then(|v| v.as_str()) {
+            base.family = if family.eq_ignore_ascii_case("proportional") {
+                FontFamilyKind::Proportional
+            } else {
+                FontFamilyKind::Monospace
+            };
+        }
+        if let Some(ligatures) = font.get("ligatures").and_then(|v| v.as_bool()) {
+            base.ligatures = ligatures;
+        }
+    }
+    if let Some(folder_overrides) = value.get("folder_overrides").and_then(|v| v.as_array()) {
+        for item in folder_overrides {
+            let Some(folder) = item.get("folder").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let size = item
+                .get("size")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(base.size);
+            let family = item
+                .get("family")
+                .and_then(|v| v.as_str())
+                .map(|v| {
+                    if v.eq_ignore_ascii_case("proportional") {
+                        FontFamilyKind::Proportional
+                    } else {
+                        FontFamilyKind::Monospace
+                    }
+                })
+                .unwrap_or(base.family);
+            let ligatures = item
+                .get("ligatures")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(base.ligatures);
+            overrides.insert(
+                PathBuf::from(folder),
+                WorkspaceFontSettings {
+                    size,
+                    family,
+                    ligatures,
+                },
+            );
+        }
+    }
+    (base, overrides)
+}
+
+fn symbol_score(candidate: &str, query: &str) -> Option<i32> {
+    if candidate == query {
+        return Some(100);
+    }
+    if candidate.starts_with(query) {
+        return Some(80);
+    }
+    if let Some(idx) = candidate.find(query) {
+        return Some(60 - idx as i32);
+    }
+    let mut score = 0i32;
+    let mut cursor = 0usize;
+    for ch in query.chars() {
+        if let Some(found) = candidate[cursor..].find(ch) {
+            score += 2;
+            cursor += found + 1;
+        } else {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+fn build_simple_diff_preview(before: &str, after: &str) -> String {
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let max_len = before_lines.len().max(after_lines.len());
+    let mut out = String::new();
+    for i in 0..max_len {
+        let b = before_lines.get(i).copied();
+        let a = after_lines.get(i).copied();
+        match (b, a) {
+            (Some(b), Some(a)) if b == a => {}
+            (Some(b), Some(a)) => {
+                out.push_str(&format!("- {:>4} {}\n", i + 1, b));
+                out.push_str(&format!("+ {:>4} {}\n", i + 1, a));
+            }
+            (Some(b), None) => out.push_str(&format!("- {:>4} {}\n", i + 1, b)),
+            (None, Some(a)) => out.push_str(&format!("+ {:>4} {}\n", i + 1, a)),
+            (None, None) => {}
+        }
+    }
+    if out.is_empty() {
+        "No textual differences".to_string()
+    } else {
+        out
+    }
+}
+
+fn parse_stacktrace_location(line: &str) -> Option<(PathBuf, usize)> {
+    let mut parts = line.split(':').collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return None;
+    }
+    let line_part = parts.pop()?.trim();
+    let line_no = line_part.parse::<usize>().ok()?;
+    let path = parts.join(":");
+    let candidate = PathBuf::from(path.trim());
+    if candidate.exists() {
+        Some((candidate, line_no))
+    } else {
+        None
+    }
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }

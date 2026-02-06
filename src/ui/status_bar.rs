@@ -56,6 +56,33 @@ pub fn show(
         // Note: \u{E0A0} is Nerd Font git branch. 
         // If not available, we can use "git: "
     }
+    let mut added = 0usize;
+    let mut modified = 0usize;
+    let mut removed = 0usize;
+    for h in &editor.diff_hunks {
+        let span = h.end.saturating_sub(h.start).max(1);
+        match h.kind {
+            crate::editor::DiffKind::Added => added += span,
+            crate::editor::DiffKind::Modified => modified += span,
+            crate::editor::DiffKind::Removed => removed += span,
+        }
+    }
+    status_item(&mut ui, &format!("SCM +{} ~{} -{}", added, modified, removed));
+    let diag_errors = editor
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity <= 2)
+        .count();
+    let diag_warnings = editor
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == 3)
+        .count();
+    let diag_text = format!("Diag E:{} W:{}", diag_errors, diag_warnings);
+    status_item(&mut ui, &diag_text);
+    status_item(&mut ui, &format!("Tasks {}", editor.background_tasks));
+    status_item(&mut ui, &format!("Badge {}", editor.notification_badges));
+    status_item(&mut ui, &editor.lsp_status);
 
     // Spacer
     ui.label(""); 

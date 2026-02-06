@@ -1,5 +1,7 @@
 mod app;
 mod editor;
+mod lsp;
+mod plugin;
 mod syntax;
 mod ui;
 

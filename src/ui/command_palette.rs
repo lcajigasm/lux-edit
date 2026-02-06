@@ -9,7 +9,7 @@ pub struct Command {
     pub category: CommandCategory,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CommandId {
     NewTab,
     OpenFile,
@@ -21,6 +21,13 @@ pub enum CommandId {
     SelectAll,
     Undo,
     Redo,
+    FormatDocument,
+    ToggleGitPanel,
+    RefreshGitPanel,
+    StartDebugSession,
+    RunTask,
+    RunCustomScript,
+    Extension(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +37,7 @@ pub enum CommandCategory {
     Selection,
     Navigation,
     Find,
+    Extensions,
 }
 
 impl CommandCategory {
@@ -40,6 +48,7 @@ impl CommandCategory {
             CommandCategory::Selection => "Selection",
             CommandCategory::Navigation => "Navigation",
             CommandCategory::Find => "Find",
+            CommandCategory::Extensions => "Extensions",
         }
     }
 
@@ -50,6 +59,7 @@ impl CommandCategory {
             CommandCategory::Selection => 22,
             CommandCategory::Navigation => 24,
             CommandCategory::Find => 26,
+            CommandCategory::Extensions => 18,
         }
     }
 
@@ -60,6 +70,7 @@ impl CommandCategory {
             CommandCategory::Selection => &["select", "selection"],
             CommandCategory::Navigation => &["nav", "goto", "jump"],
             CommandCategory::Find => &["find", "search", "replace"],
+            CommandCategory::Extensions => &["extension", "plugin", "custom"],
         }
     }
 }
@@ -146,6 +157,42 @@ impl CommandPalette {
                     id: CommandId::Redo,
                     category: CommandCategory::Edit,
                 },
+                Command {
+                    name: "Format Document".into(),
+                    shortcut: "Ctrl+Shift+F".into(),
+                    id: CommandId::FormatDocument,
+                    category: CommandCategory::Edit,
+                },
+                Command {
+                    name: "Git: Toggle Panel".into(),
+                    shortcut: "".into(),
+                    id: CommandId::ToggleGitPanel,
+                    category: CommandCategory::Extensions,
+                },
+                Command {
+                    name: "Git: Refresh Panel".into(),
+                    shortcut: "".into(),
+                    id: CommandId::RefreshGitPanel,
+                    category: CommandCategory::Extensions,
+                },
+                Command {
+                    name: "Debug: Start Session".into(),
+                    shortcut: "".into(),
+                    id: CommandId::StartDebugSession,
+                    category: CommandCategory::Extensions,
+                },
+                Command {
+                    name: "Task: Run Workspace Task".into(),
+                    shortcut: "".into(),
+                    id: CommandId::RunTask,
+                    category: CommandCategory::Extensions,
+                },
+                Command {
+                    name: "Script: Run Custom Script".into(),
+                    shortcut: "".into(),
+                    id: CommandId::RunCustomScript,
+                    category: CommandCategory::Extensions,
+                },
             ],
             usage: HashMap::new(),
             use_counter: 0,
@@ -163,6 +210,28 @@ impl CommandPalette {
     pub fn close(&mut self) {
         self.visible = false;
         self.input.clear();
+    }
+
+    pub fn register_extension_commands<'a>(
+        &mut self,
+        provider: &str,
+        commands: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+    ) {
+        let provider_prefix = format!("{provider}:");
+        self.commands.retain(|cmd| {
+            !matches!(
+                cmd.id,
+                CommandId::Extension(ref id) if id.starts_with(&provider_prefix)
+            )
+        });
+        for (name, shortcut, command_id) in commands {
+            self.commands.push(Command {
+                name: format!("{provider}: {name}"),
+                shortcut: shortcut.to_string(),
+                id: CommandId::Extension(format!("{provider}:{command_id}")),
+                category: CommandCategory::Extensions,
+            });
+        }
     }
 
     pub fn register_use(&mut self, id: CommandId) {
@@ -256,7 +325,7 @@ impl CommandPalette {
                         }
                         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                             if let Some((cmd, _)) = filtered.get(self.selected) {
-                                result = Some(cmd.id);
+                                result = Some(cmd.id.clone());
                                 should_close = true;
                                 return;
                             }
@@ -325,7 +394,7 @@ impl CommandPalette {
                                         .response;
 
                                     if resp.interact(Sense::click()).clicked() {
-                                        result = Some(cmd.id);
+                                        result = Some(cmd.id.clone());
                                         should_close = true;
                                     }
                                 }

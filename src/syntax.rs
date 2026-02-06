@@ -39,8 +39,20 @@ impl SyntaxHighlighter {
             }
         }
         if let Some(path) = file_path {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(mapped) = language_name_for_filename(name) {
+                    if let Some(syn) = self.syntax_set.find_syntax_by_name(mapped) {
+                        return syn;
+                    }
+                }
+            }
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 let ext = ext.to_ascii_lowercase();
+                if let Some(mapped) = language_name_for_extension(&ext) {
+                    if let Some(syn) = self.syntax_set.find_syntax_by_name(mapped) {
+                        return syn;
+                    }
+                }
                 if let Some(syn) = self.syntax_set.find_syntax_by_extension(&ext) {
                     return syn;
                 }
@@ -52,6 +64,11 @@ impl SyntaxHighlighter {
             }
         }
         if let Some(line) = first_line {
+            if let Some(mapped) = language_name_for_shebang(line) {
+                if let Some(syn) = self.syntax_set.find_syntax_by_name(mapped) {
+                    return syn;
+                }
+            }
             if let Some(syn) = self.syntax_set.find_syntax_by_first_line(line) {
                 return syn;
             }
@@ -124,4 +141,77 @@ impl SyntaxHighlighter {
 
 fn syntect_to_egui(style: Style) -> Color32 {
     Color32::from_rgb(style.foreground.r, style.foreground.g, style.foreground.b)
+}
+
+fn language_name_for_extension(ext: &str) -> Option<&'static str> {
+    let mapped = match ext {
+        "c" | "h" => "C",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => "C++",
+        "rs" => "Rust",
+        "go" => "Go",
+        "py" | "pyw" => "Python",
+        "js" | "mjs" | "cjs" => "JavaScript",
+        "ts" | "mts" | "cts" => "TypeScript",
+        "jsx" => "JavaScript (JSX)",
+        "tsx" => "TypeScriptReact",
+        "html" | "htm" => "HTML",
+        "css" | "scss" | "sass" | "less" => "CSS",
+        "java" => "Java",
+        "cs" => "C#",
+        "sql" => "SQL",
+        "sh" | "bash" | "zsh" => "Bourne Again Shell (bash)",
+        "ps1" => "PowerShell",
+        "json" => "JSON",
+        "yaml" | "yml" => "YAML",
+        "toml" => "TOML",
+        "xml" => "XML",
+        "md" | "markdown" | "mdx" => "Markdown",
+        "lua" => "Lua",
+        "php" => "PHP",
+        "rb" => "Ruby",
+        "swift" => "Swift",
+        "kt" | "kts" => "Kotlin",
+        "dart" => "Dart",
+        "r" => "R",
+        _ => return None,
+    };
+    Some(mapped)
+}
+
+fn language_name_for_filename(name: &str) -> Option<&'static str> {
+    let mapped = match name {
+        "Dockerfile" => "Dockerfile",
+        "Makefile" => "Makefile",
+        "CMakeLists.txt" => "CMake",
+        ".bashrc" | ".bash_profile" | ".zshrc" | ".zprofile" | ".profile" => {
+            "Bourne Again Shell (bash)"
+        }
+        ".gitignore" | ".gitattributes" => "Git Attributes",
+        "Cargo.toml" | "pyproject.toml" => "TOML",
+        "package.json" | "tsconfig.json" => "JSON",
+        _ => return None,
+    };
+    Some(mapped)
+}
+
+fn language_name_for_shebang(first_line: &str) -> Option<&'static str> {
+    if !first_line.starts_with("#!") {
+        return None;
+    }
+    if first_line.contains("python") {
+        return Some("Python");
+    }
+    if first_line.contains("node") || first_line.contains("deno") || first_line.contains("bun") {
+        return Some("JavaScript");
+    }
+    if first_line.contains("bash") || first_line.contains("sh") || first_line.contains("zsh") {
+        return Some("Bourne Again Shell (bash)");
+    }
+    if first_line.contains("ruby") {
+        return Some("Ruby");
+    }
+    if first_line.contains("php") {
+        return Some("PHP");
+    }
+    None
 }
