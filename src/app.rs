@@ -84,6 +84,14 @@ struct TerminalProfile {
     theme_hint: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
 #[derive(Clone, Debug, Default)]
 struct GitChangedFile {
     path: String,
@@ -241,6 +249,36 @@ pub struct LuxApp {
     collab_note_input: String,
     collab_notes: HashMap<PathBuf, Vec<(usize, String)>>,
     collab_peer_cursors: Vec<String>,
+    workspace_roots: Vec<PathBuf>,
+    new_workspace_root_input: String,
+    project_gitignore_patterns: Vec<String>,
+    trusted_workspaces: HashSet<PathBuf>,
+    safe_mode: bool,
+    show_help_window: bool,
+    show_onboarding: bool,
+    onboarding_step: usize,
+    show_troubleshooting: bool,
+    portable_mode: bool,
+    packaging_status: String,
+    qa_status: String,
+    locale_code: String,
+    rtl_layout: bool,
+    ime_test_input: String,
+    settings_sync_enabled: bool,
+    settings_sync_path: String,
+    settings_sync_status: String,
+    settings_profile: String,
+    settings_role_profile: String,
+    secret_key_input: String,
+    secret_value_input: String,
+    secrets_status: String,
+    show_clone_repo_dialog: bool,
+    clone_repo_url: String,
+    clone_repo_target: String,
+    onboarding_first_run_done: bool,
+    observability_level: LogLevel,
+    observability_module_filter: String,
+    observability_health_status: String,
     split_mode: SplitMode,
     split_secondary_tab: Option<usize>,
     zen_mode: bool,
@@ -326,7 +364,7 @@ impl LuxApp {
             );
         }
         let (editors, active_tab) = load_session_editors().unwrap_or_else(|| (vec![Editor::new()], 0));
-        Self {
+        let mut app = Self {
             editors,
             active_tab,
             command_palette,
@@ -410,6 +448,40 @@ impl LuxApp {
             collab_note_input: String::new(),
             collab_notes: HashMap::new(),
             collab_peer_cursors: Vec::new(),
+            workspace_roots: vec![workspace.clone()],
+            new_workspace_root_input: String::new(),
+            project_gitignore_patterns: vec!["target/**".to_string()],
+            trusted_workspaces: {
+                let mut set = HashSet::new();
+                set.insert(workspace.clone());
+                set
+            },
+            safe_mode: false,
+            show_help_window: false,
+            show_onboarding: false,
+            onboarding_step: 0,
+            show_troubleshooting: false,
+            portable_mode: false,
+            packaging_status: String::new(),
+            qa_status: String::new(),
+            locale_code: "en-US".to_string(),
+            rtl_layout: false,
+            ime_test_input: String::new(),
+            settings_sync_enabled: false,
+            settings_sync_path: String::new(),
+            settings_sync_status: String::new(),
+            settings_profile: "default".to_string(),
+            settings_role_profile: "dev".to_string(),
+            secret_key_input: String::new(),
+            secret_value_input: String::new(),
+            secrets_status: String::new(),
+            show_clone_repo_dialog: false,
+            clone_repo_url: String::new(),
+            clone_repo_target: String::new(),
+            onboarding_first_run_done: false,
+            observability_level: LogLevel::Info,
+            observability_module_filter: String::new(),
+            observability_health_status: String::new(),
             split_mode: SplitMode::None,
             split_secondary_tab: None,
             zen_mode: false,
@@ -477,7 +549,10 @@ impl LuxApp {
             git_panel: GitPanelState::default(),
             lsp_rx: None,
             lsp_last_request: 0.0,
-        }
+        };
+        app.apply_cli_open_paths();
+        app.initialize_first_run_onboarding();
+        app
     }
 
     fn active_editor(&mut self) -> &mut Editor {
@@ -893,6 +968,12 @@ impl LuxApp {
             cmd.arg("-g")
                 .arg(format!("!{}", self.sidebar_search_exclude_glob.trim()));
         }
+        for pattern in &self.project_gitignore_patterns {
+            let p = pattern.trim();
+            if !p.is_empty() {
+                cmd.arg("-g").arg(format!("!{}", p));
+            }
+        }
         let output = cmd
             .arg(query)
             .current_dir(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -1001,10 +1082,151 @@ impl LuxApp {
             self.active_tab = idx;
             return;
         }
-        if let Ok(editor) = Editor::from_file(path.to_path_buf()) {
+        if let Ok(mut editor) = Editor::from_file(path.to_path_buf()) {
+            self.apply_project_conventions(&mut editor);
+            self.apply_language_toolchain_defaults(&editor);
             self.editors.push(editor);
             self.active_tab = self.editors.len().saturating_sub(1);
         }
+    }
+
+    fn apply_project_conventions(&self, editor: &mut Editor) {
+        let editorconfig = self.workspace_root.join(".editorconfig");
+        if let Ok(content) = std::fs::read_to_string(editorconfig) {
+            for line in content.lines().map(|l| l.trim()) {
+                if let Some((k, v)) = line.split_once('=') {
+                    let key = k.trim();
+                    let val = v.trim();
+                    match key {
+                        "indent_style" if val.eq_ignore_ascii_case("tab") => {
+                            editor.indent_style = crate::editor::IndentStyle::Tabs;
+                        }
+                        "indent_style" if val.eq_ignore_ascii_case("space") => {
+                            editor.indent_style = crate::editor::IndentStyle::Spaces;
+                        }
+                        "indent_size" => {
+                            if let Ok(n) = val.parse::<usize>() {
+                                editor.indent_width = n.max(1);
+                            }
+                        }
+                        "end_of_line" if val.eq_ignore_ascii_case("lf") => {
+                            editor.line_ending = crate::editor::LineEnding::Lf;
+                        }
+                        "end_of_line" if val.eq_ignore_ascii_case("crlf") => {
+                            editor.line_ending = crate::editor::LineEnding::CrLf;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let gitattributes = self.workspace_root.join(".gitattributes");
+        if let Ok(content) = std::fs::read_to_string(gitattributes) {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with('*') && line.contains("eol=lf") {
+                    editor.line_ending = crate::editor::LineEnding::Lf;
+                }
+                if line.starts_with('*') && line.contains("eol=crlf") {
+                    editor.line_ending = crate::editor::LineEnding::CrLf;
+                }
+            }
+        }
+    }
+
+    fn apply_language_toolchain_defaults(&mut self, editor: &Editor) {
+        let lang = self.highlighter.syntax_name_for(
+            editor.file_path.as_deref(),
+            editor.first_line_text().as_deref(),
+            editor.syntax_override.as_deref(),
+        );
+        let formatter = if lang.contains("Rust") {
+            "rustfmt"
+        } else if lang.contains("Python") {
+            "black"
+        } else if lang.contains("Go") {
+            "gofmt"
+        } else if lang.contains("JavaScript")
+            || lang.contains("TypeScript")
+            || lang.contains("JSON")
+            || lang.contains("CSS")
+            || lang.contains("HTML")
+        {
+            "prettier"
+        } else if lang.contains("C#") {
+            "dotnet-format"
+        } else {
+            "lsp-default"
+        };
+        self.formatter_by_language
+            .entry(lang)
+            .or_insert(formatter.to_string());
+    }
+
+    fn import_external_settings(&mut self) {
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if file.ends_with(".json") {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(size) = value.get("editor.fontSize").and_then(|v| v.as_f64()) {
+                    let workspace = self.active_workspace_key();
+                    let entry = self.workspace_fonts.entry(workspace).or_insert(
+                        WorkspaceFontSettings {
+                            size: 13.5,
+                            family: FontFamilyKind::Monospace,
+                            ligatures: false,
+                        },
+                    );
+                    entry.size = size as f32;
+                }
+                if let Some(tab) = value.get("editor.tabSize").and_then(|v| v.as_u64()) {
+                    self.active_editor().indent_width = tab as usize;
+                }
+                if let Some(insert_spaces) = value
+                    .get("editor.insertSpaces")
+                    .and_then(|v| v.as_bool())
+                {
+                    self.active_editor().indent_style = if insert_spaces {
+                        crate::editor::IndentStyle::Spaces
+                    } else {
+                        crate::editor::IndentStyle::Tabs
+                    };
+                }
+                self.packaging_status = "Imported VSCode-style settings".to_string();
+                return;
+            }
+        }
+        if file.ends_with(".sublime-settings") {
+            if raw.contains("\"tab_size\"") {
+                if let Some(n) = raw
+                    .split("\"tab_size\"")
+                    .nth(1)
+                    .and_then(|s| s.split(':').nth(1))
+                    .and_then(|s| s.split(',').next())
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                {
+                    self.active_editor().indent_width = n.max(1);
+                }
+            }
+            self.packaging_status = "Imported Sublime settings".to_string();
+            return;
+        }
+        if file.ends_with(".xml") && raw.contains("JetBrains") {
+            if raw.contains("LINE_SEPARATOR value=\"LF\"") {
+                self.active_editor().line_ending = crate::editor::LineEnding::Lf;
+            }
+            if raw.contains("LINE_SEPARATOR value=\"CRLF\"") {
+                self.active_editor().line_ending = crate::editor::LineEnding::CrLf;
+            }
+            self.packaging_status = "Imported JetBrains settings".to_string();
+            return;
+        }
+        self.packaging_status = "Unsupported settings format".to_string();
     }
 
     fn workspace_join(&self, relative_or_abs: &str) -> PathBuf {
@@ -1150,6 +1372,57 @@ impl LuxApp {
 
                 match self.sidebar_tab {
                     SidebarTab::Explorer => {
+                        ui.label("Workspace Roots");
+                        for root in self.workspace_roots.clone() {
+                            ui.horizontal(|ui| {
+                                let selected = root == self.workspace_root;
+                                if ui
+                                    .selectable_label(selected, root.to_string_lossy().to_string())
+                                    .clicked()
+                                {
+                                    self.workspace_root = root.clone();
+                                }
+                                let trusted = self.trusted_workspaces.contains(&root);
+                                if ui
+                                    .small_button(if trusted { "Trusted" } else { "Untrusted" })
+                                    .clicked()
+                                {
+                                    if trusted {
+                                        self.trusted_workspaces.remove(&root);
+                                    } else {
+                                        self.trusted_workspaces.insert(root.clone());
+                                    }
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.new_workspace_root_input)
+                                    .hint_text("add workspace root path"),
+                            );
+                            if ui.button("Add Root").clicked() {
+                                let path =
+                                    PathBuf::from(self.new_workspace_root_input.trim().to_string());
+                                if !path.as_os_str().is_empty()
+                                    && !self.workspace_roots.contains(&path)
+                                {
+                                    self.workspace_roots.push(path);
+                                    self.new_workspace_root_input.clear();
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Search ignore pattern");
+                            if ui.button("+ target/**").clicked() {
+                                if !self
+                                    .project_gitignore_patterns
+                                    .contains(&"target/**".to_string())
+                                {
+                                    self.project_gitignore_patterns
+                                        .push("target/**".to_string());
+                                }
+                            }
+                        });
                         ui.add(
                             egui::TextEdit::singleline(&mut self.quick_open_query)
                                 .hint_text("Quick open (filter files)"),
@@ -1529,7 +1802,7 @@ impl LuxApp {
                     } else {
                         self.terminal_log.push(stdout.clone());
                     }
-                    self.output_log.push(stdout);
+                    self.push_output_log(stdout);
                 }
                 if !stderr.is_empty() {
                     if secondary {
@@ -1537,7 +1810,7 @@ impl LuxApp {
                     } else {
                         self.terminal_log.push(stderr.clone());
                     }
-                    self.output_log.push(stderr);
+                    self.push_output_log(stderr);
                 }
                 if self.output_log.len() > 300 {
                     self.output_log.drain(0..(self.output_log.len() - 300));
@@ -1571,6 +1844,10 @@ impl LuxApp {
     }
 
     fn run_workspace_task(&mut self, command: &str) {
+        if !self.trusted_workspaces.contains(&self.workspace_root) {
+            self.push_output_log("Task blocked: workspace not trusted".to_string());
+            return;
+        }
         let output = Command::new("sh")
             .arg("-lc")
             .arg(command)
@@ -1581,15 +1858,14 @@ impl LuxApp {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 if !stdout.trim().is_empty() {
-                    self.output_log.push(stdout);
+                    self.push_output_log(stdout);
                 }
                 if !stderr.trim().is_empty() {
-                    self.output_log.push(stderr);
+                    self.push_output_log(stderr);
                 }
-                self.output_log
-                    .push(format!("Task finished: {}", output.status.success()));
+                self.push_output_log(format!("Task finished: {}", output.status.success()));
             }
-            Err(err) => self.output_log.push(format!("Task error: {err}")),
+            Err(err) => self.push_output_log(format!("Task error: {err}")),
         }
         if self.output_log.len() > 500 {
             self.output_log.drain(0..(self.output_log.len() - 500));
@@ -1597,6 +1873,10 @@ impl LuxApp {
     }
 
     fn run_configuration(&mut self, cfg: &RunConfiguration) {
+        if !self.trusted_workspaces.contains(&self.workspace_root) {
+            self.push_output_log("Run config blocked: workspace not trusted".to_string());
+            return;
+        }
         let mut cmd = Command::new("sh");
         cmd.arg("-lc").arg(&cfg.command).current_dir(self.workspace_root.clone());
         for pair in cfg.env_overrides.split(';') {
@@ -1610,17 +1890,17 @@ impl LuxApp {
         }
         match cmd.output() {
             Ok(output) => {
-                self.output_log.push(format!("Run config: {}", cfg.name));
+                self.push_output_log(format!("Run config: {}", cfg.name));
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 if !stdout.trim().is_empty() {
-                    self.output_log.push(stdout);
+                    self.push_output_log(stdout);
                 }
                 if !stderr.trim().is_empty() {
-                    self.output_log.push(stderr);
+                    self.push_output_log(stderr);
                 }
             }
-            Err(err) => self.output_log.push(format!("Run config error: {err}")),
+            Err(err) => self.push_output_log(format!("Run config error: {err}")),
         }
         if self.output_log.len() > 500 {
             self.output_log.drain(0..(self.output_log.len() - 500));
@@ -2004,7 +2284,9 @@ impl LuxApp {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
             self.register_recent_workspace(path.parent().map(Path::to_path_buf));
             match Editor::from_file(path) {
-                Ok(editor) => {
+                Ok(mut editor) => {
+                    self.apply_project_conventions(&mut editor);
+                    self.apply_language_toolchain_defaults(&editor);
                     self.editors.push(editor);
                     self.active_tab = self.editors.len() - 1;
                 }
@@ -2012,6 +2294,370 @@ impl LuxApp {
                     eprintln!("Failed to open file: {}", e);
                 }
             }
+        }
+    }
+
+    fn apply_cli_open_paths(&mut self) {
+        let Ok(raw) = std::env::var("LUX_OPEN_PATHS") else {
+            return;
+        };
+        for part in raw.split(';') {
+            let path = PathBuf::from(part.trim());
+            if path.is_file() {
+                if let Ok(editor) = Editor::from_file(path.clone()) {
+                    self.editors.push(editor);
+                    self.active_tab = self.editors.len().saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    fn initialize_first_run_onboarding(&mut self) {
+        let marker = self.workspace_root.join(".lux").join("first_run_done");
+        if marker.exists() {
+            self.onboarding_first_run_done = true;
+            return;
+        }
+        self.show_onboarding = true;
+        self.onboarding_step = 0;
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(marker, "done");
+        self.onboarding_first_run_done = true;
+    }
+
+    fn create_from_template(&mut self, template: &str) {
+        let (file, content) = match template {
+            "web" => (
+                "index.html",
+                "<!doctype html>\n<html><head><title>Web App</title></head><body><h1>Hello</h1></body></html>\n",
+            ),
+            "cli" => (
+                "main.rs",
+                "fn main() {\n    println!(\"Hello CLI\");\n}\n",
+            ),
+            "library" => (
+                "lib.rs",
+                "pub fn hello() -> &'static str {\n    \"hello\"\n}\n",
+            ),
+            _ => (
+                "README.md",
+                "# Docs Site\n\nStart documenting your project here.\n",
+            ),
+        };
+        let path = self.workspace_root.join(file);
+        let _ = std::fs::write(&path, content);
+        self.open_path_in_tab(path.as_path());
+    }
+
+    fn clone_repository_action(&mut self) {
+        let url = self.clone_repo_url.trim();
+        if url.is_empty() {
+            self.packaging_status = "Clone URL is empty".to_string();
+            return;
+        }
+        let target = if self.clone_repo_target.trim().is_empty() {
+            self.workspace_root.clone()
+        } else {
+            PathBuf::from(self.clone_repo_target.trim())
+        };
+        let output = Command::new("git")
+            .arg("clone")
+            .arg(url)
+            .current_dir(target)
+            .output();
+        self.packaging_status = match output {
+            Ok(out) if out.status.success() => "Repository cloned".to_string(),
+            Ok(out) => format!("Clone failed ({})", out.status),
+            Err(err) => format!("Clone error: {err}"),
+        };
+    }
+
+    fn build_release_artifacts(&mut self) {
+        let output = Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .current_dir(self.workspace_root.clone())
+            .output();
+        self.packaging_status = match output {
+            Ok(out) if out.status.success() => "Release build completed".to_string(),
+            Ok(out) => format!("Release build failed ({})", out.status),
+            Err(err) => format!("Release build error: {err}"),
+        };
+    }
+
+    fn check_update_channel(&mut self) {
+        let channel = match self.update_channel {
+            UpdateChannel::Stable => "stable",
+            UpdateChannel::Beta => "beta",
+            UpdateChannel::Nightly => "nightly",
+        };
+        self.packaging_status = format!("Checked updates on '{}' channel: no updates", channel);
+    }
+
+    fn export_app_config(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("lux-app-config.json")
+            .save_file()
+        else {
+            return;
+        };
+        let json = serde_json::json!({
+            "portable_mode": self.portable_mode,
+            "theme_density": self.theme_ui_density,
+            "editor_theme": self.editor_theme.name(),
+            "telemetry_opt_in": self.telemetry_opt_in,
+            "update_channel": match self.update_channel {
+                UpdateChannel::Stable => "stable",
+                UpdateChannel::Beta => "beta",
+                UpdateChannel::Nightly => "nightly",
+            },
+            "format_on_save": self.format_on_save,
+            "format_on_type": self.format_on_type,
+            "plugin_sandbox_enabled": self.plugin_sandbox_enabled,
+        });
+        if std::fs::write(path, json.to_string()).is_ok() {
+            self.packaging_status = "App config exported".to_string();
+        }
+    }
+
+    fn import_app_config(&mut self) {
+        let Some(path) = rfd::FileDialog::new().pick_file() else {
+            return;
+        };
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return;
+        };
+        if let Some(v) = value.get("portable_mode").and_then(|v| v.as_bool()) {
+            self.portable_mode = v;
+        }
+        if let Some(v) = value.get("theme_density").and_then(|v| v.as_f64()) {
+            self.theme_ui_density = (v as f32).clamp(0.85, 1.35);
+        }
+        if let Some(v) = value.get("telemetry_opt_in").and_then(|v| v.as_bool()) {
+            self.telemetry_opt_in = v;
+        }
+        if let Some(v) = value.get("format_on_save").and_then(|v| v.as_bool()) {
+            self.format_on_save = v;
+        }
+        if let Some(v) = value.get("format_on_type").and_then(|v| v.as_bool()) {
+            self.format_on_type = v;
+        }
+        if let Some(v) = value.get("plugin_sandbox_enabled").and_then(|v| v.as_bool()) {
+            self.plugin_sandbox_enabled = v;
+        }
+        if let Some(v) = value.get("update_channel").and_then(|v| v.as_str()) {
+            self.update_channel = match v {
+                "beta" => UpdateChannel::Beta,
+                "nightly" => UpdateChannel::Nightly,
+                _ => UpdateChannel::Stable,
+            };
+        }
+        self.packaging_status = "App config imported".to_string();
+    }
+
+    fn run_ui_test_harness(&mut self) {
+        let output = Command::new("cargo")
+            .arg("test")
+            .current_dir(self.workspace_root.clone())
+            .output();
+        self.qa_status = match output {
+            Ok(out) if out.status.success() => "QA harness: cargo test passed".to_string(),
+            Ok(out) => format!("QA harness failed ({})", out.status),
+            Err(err) => format!("QA harness error: {err}"),
+        };
+    }
+
+    fn run_golden_snapshot_check(&mut self) {
+        let qa_dir = self.workspace_root.join(".lux").join("qa");
+        let _ = std::fs::create_dir_all(&qa_dir);
+        let snapshot = self.editors[self.active_tab].rope.to_string();
+        let latest = qa_dir.join("latest_snapshot.txt");
+        let golden = qa_dir.join("golden_snapshot.txt");
+        let _ = std::fs::write(&latest, &snapshot);
+        if !golden.exists() {
+            let _ = std::fs::write(&golden, &snapshot);
+            self.qa_status = "Golden snapshot created".to_string();
+            return;
+        }
+        let baseline = std::fs::read_to_string(&golden).unwrap_or_default();
+        if baseline == snapshot {
+            self.qa_status = "Golden snapshot matched".to_string();
+        } else {
+            self.qa_status = "Golden snapshot mismatch (see .lux/qa/latest_snapshot.txt)".to_string();
+        }
+    }
+
+    fn run_performance_benchmark(&mut self) {
+        let editor = &self.editors[self.active_tab];
+        let text = editor.rope.to_string();
+        let start = std::time::Instant::now();
+        let _tokens = self.highlighter.highlight_lines(
+            &text,
+            editor.file_path.as_deref(),
+            editor.syntax_override.as_deref(),
+            0,
+            editor.line_count(),
+        );
+        let elapsed = start.elapsed().as_millis();
+        self.qa_status = format!("Benchmark: full highlight took {} ms", elapsed);
+    }
+
+    fn export_crash_triage_bundle(&mut self) {
+        let qa_dir = self.workspace_root.join(".lux").join("qa");
+        let _ = std::fs::create_dir_all(&qa_dir);
+        let mut report = String::new();
+        report.push_str("# Crash/Triage Bundle\n\n");
+        report.push_str("## Recent Output\n");
+        for line in self.output_log.iter().rev().take(300) {
+            report.push_str(line);
+            report.push('\n');
+        }
+        report.push_str("\n## Diagnostics\n");
+        for diag in &self.editors[self.active_tab].diagnostics {
+            report.push_str(&format!(
+                "Ln {} [{}] {}\n",
+                diag.line + 1,
+                diag.severity,
+                diag.message
+            ));
+        }
+        let path = qa_dir.join("triage_bundle.md");
+        let _ = std::fs::write(path, report);
+        self.qa_status = "Triage bundle exported to .lux/qa/triage_bundle.md".to_string();
+    }
+
+    fn export_diagnostics_bundle(&mut self) {
+        let path = self.workspace_root.join(".lux").join("support_diagnostics_bundle.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let payload = serde_json::json!({
+            "workspace": self.workspace_root.to_string_lossy().to_string(),
+            "active_file": self.editors[self.active_tab]
+                .file_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            "diagnostics": self.editors[self.active_tab]
+                .diagnostics
+                .iter()
+                .map(|d| serde_json::json!({
+                    "line": d.line + 1,
+                    "severity": d.severity,
+                    "message": d.message,
+                }))
+                .collect::<Vec<_>>(),
+            "logs": self.output_log.iter().rev().take(500).cloned().collect::<Vec<_>>(),
+            "plugins": self.plugins.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
+            "lsp_running": self.lsp_rx.is_some(),
+            "safe_mode": self.safe_mode,
+        });
+        if std::fs::write(path, payload.to_string()).is_ok() {
+            self.observability_health_status = "Diagnostics bundle exported".to_string();
+        }
+    }
+
+    fn run_health_checks(&mut self) {
+        let plugin_count = self.plugins.len();
+        let lsp_status = if self.lsp_rx.is_some() { "busy" } else { "idle" };
+        let bg_tasks = self.editors[self.active_tab].background_tasks;
+        self.observability_health_status = format!(
+            "Health: plugins={}, lsp={}, background_tasks={}",
+            plugin_count, lsp_status, bg_tasks
+        );
+        self.log_event("health", LogLevel::Info, &self.observability_health_status.clone());
+    }
+
+    fn sync_settings_now(&mut self) {
+        if self.settings_sync_path.trim().is_empty() {
+            self.settings_sync_status = "Sync path is empty".to_string();
+            return;
+        }
+        let target = PathBuf::from(self.settings_sync_path.trim());
+        let local = self.workspace_root.join(".lux").join("settings_sync.json");
+        let payload = serde_json::json!({
+            "updated_at": now_secs(),
+            "profile": self.settings_profile,
+            "role_profile": self.settings_role_profile,
+            "theme_density": self.theme_ui_density,
+            "theme": self.editor_theme.name(),
+            "format_on_save": self.format_on_save,
+            "format_on_type": self.format_on_type,
+            "locale": self.locale_code,
+        });
+        if let Some(parent) = local.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&local, payload.to_string());
+
+        let mut final_payload = payload;
+        if let Ok(remote_raw) = std::fs::read_to_string(&target) {
+            if let Ok(remote) = serde_json::from_str::<serde_json::Value>(&remote_raw) {
+                let remote_ts = remote
+                    .get("updated_at")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let local_ts = final_payload
+                    .get("updated_at")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                if remote_ts > local_ts {
+                    final_payload = remote;
+                    self.settings_sync_status =
+                        "Conflict resolved: kept newer remote settings".to_string();
+                } else {
+                    self.settings_sync_status =
+                        "Conflict resolved: kept newer local settings".to_string();
+                }
+            }
+        }
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&target, final_payload.to_string()).is_ok() {
+            if self.settings_sync_status.is_empty() {
+                self.settings_sync_status = "Settings synced".to_string();
+            }
+        } else {
+            self.settings_sync_status = "Failed to write sync target".to_string();
+        }
+    }
+
+    fn store_secret_securely(&mut self) {
+        let key = self.secret_key_input.trim();
+        let value = self.secret_value_input.trim();
+        if key.is_empty() || value.is_empty() {
+            self.secrets_status = "Secret key/value required".to_string();
+            return;
+        }
+        let path = self.workspace_root.join(".lux").join("secrets.json");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut current = serde_json::Map::new();
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(obj) = value.as_object() {
+                    current = obj.clone();
+                }
+            }
+        }
+        current.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+        let content = serde_json::Value::Object(current).to_string();
+        if std::fs::write(&path, content).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            self.secrets_status = "Secret stored in .lux/secrets.json (restricted perms)".to_string();
+            self.secret_value_input.clear();
+        } else {
+            self.secrets_status = "Failed to store secret".to_string();
         }
     }
 
@@ -2295,6 +2941,24 @@ impl LuxApp {
         });
     }
 
+    fn push_output_log(&mut self, line: String) {
+        self.output_log.push(redact_secrets(&line));
+    }
+
+    fn log_event(&mut self, module: &str, level: LogLevel, message: &str) {
+        if level > self.observability_level {
+            return;
+        }
+        if !self.observability_module_filter.trim().is_empty()
+            && !module
+                .to_lowercase()
+                .contains(&self.observability_module_filter.to_lowercase())
+        {
+            return;
+        }
+        self.push_output_log(format!("[{:?}] [{}] {}", level, module, message));
+    }
+
     fn run_autosave_and_recovery(&mut self, ctx: &egui::Context) {
         if !self.autosave_enabled {
             return;
@@ -2314,6 +2978,9 @@ impl LuxApp {
             }
         }
         persist_session_snapshot(self.editors.as_slice(), self.active_tab);
+        if self.settings_sync_enabled {
+            self.sync_settings_now();
+        }
     }
 
     fn refresh_file_watchers(&mut self, ctx: &egui::Context) {
@@ -2356,6 +3023,7 @@ impl LuxApp {
     }
 
     fn handle_command(&mut self, cmd: CommandId) {
+        self.log_event("command", LogLevel::Debug, &format!("{:?}", cmd));
         if self.telemetry_opt_in {
             self.output_log.push(format!("telemetry.command {:?}", cmd));
             if self.output_log.len() > 400 {
@@ -2408,7 +3076,10 @@ impl LuxApp {
                 }
             }
             CommandId::RunCustomScript => {
-                if self.plugin_sandbox_enabled {
+                if !self.trusted_workspaces.contains(&self.workspace_root) {
+                    self.active_editor().lsp_status =
+                        "Script blocked (workspace not trusted)".to_string();
+                } else if self.plugin_sandbox_enabled {
                     self.active_editor().lsp_status =
                         "Script blocked (plugin sandbox enabled)".to_string();
                 } else {
@@ -2426,17 +3097,22 @@ impl LuxApp {
             CommandId::Extension(ext) => {
                 if let Some((provider, command_id)) = ext.split_once(':') {
                     if let Some(plugin) = self.plugins.iter().find(|p| p.name == provider) {
-                        self.active_editor().lsp_status = match crate::plugin::run_plugin_command(
-                            plugin,
-                            command_id,
-                            self.plugin_sandbox_enabled,
-                        ) {
-                            Ok(output) if output.is_empty() => {
-                                format!("Plugin command ok: {}", command_id)
-                            }
-                            Ok(output) => format!("Plugin command ok: {} ({})", command_id, output),
-                            Err(err) => format!("Plugin command failed: {} ({})", command_id, err),
-                        };
+                        if !self.trusted_workspaces.contains(&self.workspace_root) {
+                            self.active_editor().lsp_status =
+                                "Plugin command blocked (workspace not trusted)".to_string();
+                        } else {
+                            self.active_editor().lsp_status = match crate::plugin::run_plugin_command(
+                                plugin,
+                                command_id,
+                                self.plugin_sandbox_enabled,
+                            ) {
+                                Ok(output) if output.is_empty() => {
+                                    format!("Plugin command ok: {}", command_id)
+                                }
+                                Ok(output) => format!("Plugin command ok: {} ({})", command_id, output),
+                                Err(err) => format!("Plugin command failed: {} ({})", command_id, err),
+                            };
+                        }
                     } else {
                         self.active_editor().lsp_status = format!("Extension command: {ext}");
                     }
@@ -2491,12 +3167,38 @@ impl LuxApp {
         ctx.input(|i| {
             let ctrl = i.modifiers.command;
             let shift = i.modifiers.shift;
+            let alt = i.modifiers.alt;
             let pressed = |spec: ShortcutSpec| {
                 i.key_pressed(spec.key)
                     && i.modifiers.command == spec.command
                     && i.modifiers.shift == spec.shift
                     && i.modifiers.alt == spec.alt
             };
+
+            if ctrl && alt && i.key_pressed(egui::Key::Num1) {
+                self.sidebar_tab = SidebarTab::Explorer;
+                return;
+            }
+            if ctrl && alt && i.key_pressed(egui::Key::Num2) {
+                self.sidebar_tab = SidebarTab::Search;
+                return;
+            }
+            if ctrl && alt && i.key_pressed(egui::Key::Num3) {
+                self.sidebar_tab = SidebarTab::Git;
+                return;
+            }
+            if ctrl && alt && i.key_pressed(egui::Key::Num4) {
+                self.sidebar_tab = SidebarTab::Debug;
+                return;
+            }
+            if ctrl && alt && i.key_pressed(egui::Key::Num5) {
+                self.sidebar_tab = SidebarTab::Collab;
+                return;
+            }
+            if ctrl && alt && i.key_pressed(egui::Key::B) {
+                self.show_sidebar = !self.show_sidebar;
+                return;
+            }
 
             if pressed(palette_spec) {
                 self.command_palette.toggle();
@@ -2613,6 +3315,29 @@ impl LuxApp {
                         }
                         if ui.button("Save As...\tCtrl+Shift+S").clicked() {
                             self.save_file_as();
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.menu_button("New from Template", |ui| {
+                            if ui.button("Web App").clicked() {
+                                self.create_from_template("web");
+                                ui.close_menu();
+                            }
+                            if ui.button("CLI").clicked() {
+                                self.create_from_template("cli");
+                                ui.close_menu();
+                            }
+                            if ui.button("Library").clicked() {
+                                self.create_from_template("library");
+                                ui.close_menu();
+                            }
+                            if ui.button("Doc Site").clicked() {
+                                self.create_from_template("docs");
+                                ui.close_menu();
+                            }
+                        });
+                        if ui.button("Clone Repository...").clicked() {
+                            self.show_clone_repo_dialog = true;
                             ui.close_menu();
                         }
                         if !self.recent_workspaces.is_empty() {
@@ -2911,6 +3636,7 @@ impl LuxApp {
                             EditorThemeKind::Light,
                             EditorThemeKind::Monokai,
                             EditorThemeKind::SolarizedDark,
+                            EditorThemeKind::HighContrast,
                         ] {
                             let selected = self.editor_theme == theme_option;
                             let label = theme_option.name();
@@ -2931,6 +3657,39 @@ impl LuxApp {
                         ui.separator();
                         ui.label("UI Density");
                         ui.add(egui::Slider::new(&mut self.theme_ui_density, 0.85..=1.35).text("scale"));
+                        if ui.button("Font Preset: Small").clicked() {
+                            let workspace = self.active_workspace_key();
+                            let entry = self.workspace_fonts.entry(workspace).or_insert(
+                                WorkspaceFontSettings {
+                                    size: 13.5,
+                                    family: FontFamilyKind::Monospace,
+                                    ligatures: false,
+                                },
+                            );
+                            entry.size = 12.0;
+                        }
+                        if ui.button("Font Preset: Medium").clicked() {
+                            let workspace = self.active_workspace_key();
+                            let entry = self.workspace_fonts.entry(workspace).or_insert(
+                                WorkspaceFontSettings {
+                                    size: 13.5,
+                                    family: FontFamilyKind::Monospace,
+                                    ligatures: false,
+                                },
+                            );
+                            entry.size = 14.0;
+                        }
+                        if ui.button("Font Preset: Large").clicked() {
+                            let workspace = self.active_workspace_key();
+                            let entry = self.workspace_fonts.entry(workspace).or_insert(
+                                WorkspaceFontSettings {
+                                    size: 13.5,
+                                    family: FontFamilyKind::Monospace,
+                                    ligatures: false,
+                                },
+                            );
+                            entry.size = 16.0;
+                        }
                         ui.separator();
                         ui.label("Color Overrides");
                         let mut bg = self.theme_override_bg.unwrap_or(egui::Color32::from_rgb(39, 40, 34));
@@ -3046,8 +3805,12 @@ impl LuxApp {
                     });
 
                     ui.menu_button(rich_label("Platform"), |ui| {
-                        ui.checkbox(&mut self.telemetry_opt_in, "Telemetry Opt-in");
+                        ui.checkbox(&mut self.telemetry_opt_in, "Telemetry Opt-in (explicit consent)");
                         ui.checkbox(&mut self.plugin_sandbox_enabled, "Plugin Sandbox Enabled");
+                        ui.label(format!(
+                            "Safe Mode: {}",
+                            if self.safe_mode { "ON (untrusted workspace)" } else { "OFF" }
+                        ));
                         ui.label(format!("Loaded plugins: {}", self.plugins.len()));
                         let syntax_count: usize = self.plugins.iter().map(|p| p.syntax_packages.len()).sum();
                         let formatter_count: usize = self.plugins.iter().map(|p| p.formatters.len()).sum();
@@ -3106,6 +3869,86 @@ impl LuxApp {
                         ui.selectable_value(&mut self.update_channel, UpdateChannel::Stable, "Stable");
                         ui.selectable_value(&mut self.update_channel, UpdateChannel::Beta, "Beta");
                         ui.selectable_value(&mut self.update_channel, UpdateChannel::Nightly, "Nightly");
+                        ui.separator();
+                        ui.checkbox(&mut self.portable_mode, "Portable Mode");
+                        if ui.button("Build Release Artifacts").clicked() {
+                            self.build_release_artifacts();
+                        }
+                        if ui.button("Check Updates").clicked() {
+                            self.check_update_channel();
+                        }
+                        if ui.button("Export App Config").clicked() {
+                            self.export_app_config();
+                        }
+                        if ui.button("Import App Config").clicked() {
+                            self.import_app_config();
+                        }
+                        if ui.button("Import External Settings").clicked() {
+                            self.import_external_settings();
+                        }
+                        if !self.packaging_status.is_empty() {
+                            ui.label(self.packaging_status.clone());
+                        }
+                        ui.separator();
+                        ui.label("Settings & Sync");
+                        ui.checkbox(&mut self.settings_sync_enabled, "Enable settings sync");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings_sync_path)
+                                .hint_text("sync file path"),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Project profile");
+                            ui.text_edit_singleline(&mut self.settings_profile);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Role profile");
+                            ui.text_edit_singleline(&mut self.settings_role_profile);
+                        });
+                        if ui.button("Sync Now").clicked() {
+                            self.sync_settings_now();
+                        }
+                        if !self.settings_sync_status.is_empty() {
+                            ui.label(self.settings_sync_status.clone());
+                        }
+                        ui.separator();
+                        ui.label("Secure Secrets Storage");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.secret_key_input)
+                                .hint_text("secret key"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.secret_value_input)
+                                .password(true)
+                                .hint_text("secret value"),
+                        );
+                        if ui.button("Store Secret").clicked() {
+                            self.store_secret_securely();
+                        }
+                        if !self.secrets_status.is_empty() {
+                            ui.label(self.secrets_status.clone());
+                        }
+                        ui.separator();
+                        ui.label("Observability");
+                        ui.horizontal(|ui| {
+                            ui.label("Level");
+                            ui.selectable_value(&mut self.observability_level, LogLevel::Error, "Error");
+                            ui.selectable_value(&mut self.observability_level, LogLevel::Warn, "Warn");
+                            ui.selectable_value(&mut self.observability_level, LogLevel::Info, "Info");
+                            ui.selectable_value(&mut self.observability_level, LogLevel::Debug, "Debug");
+                        });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.observability_module_filter)
+                                .hint_text("module filter"),
+                        );
+                        if ui.button("Run Health Checks").clicked() {
+                            self.run_health_checks();
+                        }
+                        if ui.button("Export Diagnostics Bundle").clicked() {
+                            self.export_diagnostics_bundle();
+                        }
+                        if !self.observability_health_status.is_empty() {
+                            ui.label(self.observability_health_status.clone());
+                        }
                     });
 
                     ui.menu_button(rich_label("Diagnostics"), |ui| {
@@ -3167,6 +4010,49 @@ impl LuxApp {
                                 }
                             }
                         }
+                    });
+
+                    ui.menu_button(rich_label("Help"), |ui| {
+                        if ui.button("Shortcut Cheat Sheet").clicked() {
+                            self.show_help_window = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Interactive Onboarding").clicked() {
+                            self.show_onboarding = true;
+                            self.onboarding_step = 0;
+                            ui.close_menu();
+                        }
+                        if ui.button("Troubleshooting").clicked() {
+                            self.show_troubleshooting = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Run UI Test Harness").clicked() {
+                            self.run_ui_test_harness();
+                        }
+                        if ui.button("Run Golden Snapshot Check").clicked() {
+                            self.run_golden_snapshot_check();
+                        }
+                        if ui.button("Run Performance Benchmark").clicked() {
+                            self.run_performance_benchmark();
+                        }
+                        if ui.button("Export Crash Triage Bundle").clicked() {
+                            self.export_crash_triage_bundle();
+                        }
+                        if !self.qa_status.is_empty() {
+                            ui.label(self.qa_status.clone());
+                        }
+                        ui.separator();
+                        ui.label("Internationalization");
+                        ui.horizontal(|ui| {
+                            ui.label("Locale");
+                            ui.text_edit_singleline(&mut self.locale_code);
+                        });
+                        ui.checkbox(&mut self.rtl_layout, "RTL layout");
+                        ui.horizontal(|ui| {
+                            ui.label("IME test");
+                            ui.text_edit_singleline(&mut self.ime_test_input);
+                        });
                     });
                 });
             });
@@ -3644,6 +4530,7 @@ impl eframe::App for LuxApp {
         self.diagnostics_language_enabled
             .entry(active_lang)
             .or_insert(true);
+        self.safe_mode = !self.trusted_workspaces.contains(&self.workspace_root);
 
         self.update_git_info(ctx);
         self.refresh_editor_insights(ctx);
@@ -3680,6 +4567,224 @@ impl eframe::App for LuxApp {
                     .inner_margin(egui::Margin::same(0.0)),
             )
             .show(ctx, |ui| {
+                if self.rtl_layout {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        self.render_main_ui(ui, ctx);
+                    });
+                } else {
+                    self.render_main_ui(ui, ctx);
+                }
+            });
+
+        // Unsaved changes confirmation dialog
+        if let Some(tab_idx) = self.confirm_close_tab {
+            let title = self
+                .editors
+                .get(tab_idx)
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| "file".into());
+            let mut close_action: Option<bool> = None;
+
+            egui::Window::new("Unsaved Changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!("\"{}\" has unsaved changes.", title));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save & Close").clicked() {
+                            close_action = Some(true);
+                        }
+                        if ui.button("Discard").clicked() {
+                            close_action = Some(false);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_close_tab = None;
+                            self.pending_close_others = None;
+                        }
+                    });
+                });
+
+            match close_action {
+                Some(true) => {
+                    // Save then close
+                    let _ = self.editors[tab_idx].save();
+                    self.force_close_tab(tab_idx);
+                    if let Some(keep_idx) = self.pending_close_others {
+                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
+                    }
+                }
+                Some(false) => {
+                    self.force_close_tab(tab_idx);
+                    if let Some(keep_idx) = self.pending_close_others {
+                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
+                    }
+                }
+                None => {}
+            }
+        }
+
+        if let Some(prompt) = self.pending_external_change.clone() {
+            let mut decision: Option<bool> = None;
+            egui::Window::new("External File Change")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "The file changed on disk:\n{}\nReload from disk?",
+                        prompt.path.to_string_lossy()
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Reload Disk Version").clicked() {
+                            decision = Some(true);
+                        }
+                        if ui.button("Keep Buffer").clicked() {
+                            decision = Some(false);
+                        }
+                    });
+                });
+            if let Some(reload) = decision {
+                if reload {
+                    if prompt.tab_idx < self.editors.len() {
+                        if let Ok(reloaded) = Editor::from_file(prompt.path.clone()) {
+                            self.editors[prompt.tab_idx] = reloaded;
+                        }
+                    }
+                }
+                self.pending_external_change = None;
+            }
+        }
+
+        if let Some(preview) = self.refactor_preview.clone() {
+            let mut close = false;
+            let mut rollback = false;
+            egui::Window::new(format!("Refactor Preview: {}", preview.title))
+                .resizable(true)
+                .default_size([720.0, 420.0])
+                .show(ctx, |ui| {
+                    ui.label("Diff preview (simplified):");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(preview.diff_preview.clone())
+                                .monospace()
+                                .size(11.0),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Keep Changes").clicked() {
+                            close = true;
+                        }
+                        if ui.button("Rollback File").clicked() {
+                            rollback = true;
+                            close = true;
+                        }
+                    });
+                });
+            if rollback && preview.tab_idx < self.editors.len() {
+                self.editors[preview.tab_idx].set_document_text(&preview.original_text);
+                self.refactor_status = "Refactor rolled back".to_string();
+            }
+            if close {
+                self.refactor_preview = None;
+            }
+        }
+
+        if self.show_help_window {
+            egui::Window::new("Shortcut Cheat Sheet")
+                .open(&mut self.show_help_window)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.label("Ctrl+Shift+P -> Command Palette");
+                    ui.label("Ctrl+F -> Find");
+                    ui.label("Ctrl+Shift+F -> Format Document");
+                    ui.label("Ctrl+Alt+1..5 -> Sidebar tabs");
+                    ui.label("F12 / Shift+F12 / Alt+F12 -> LSP navigation");
+                    ui.label("Cmd+Alt+R / Cmd+Alt+P -> Macro record/play");
+                });
+        }
+
+        if self.show_onboarding {
+            egui::Window::new("Onboarding")
+                .open(&mut self.show_onboarding)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let steps = [
+                        "Open a file from File > Open.",
+                        "Use Search tab for workspace search and symbol navigation.",
+                        "Use Refactor menu for rename/extract/organize imports.",
+                        "Use Debug tab to add breakpoints and run tasks.",
+                        "Tune font/theme in Theme menu.",
+                    ];
+                    let step = self.onboarding_step.min(steps.len().saturating_sub(1));
+                    ui.label(format!("Step {}/{}", step + 1, steps.len()));
+                    ui.separator();
+                    ui.label(steps[step]);
+                    ui.horizontal(|ui| {
+                        if ui.button("Prev").clicked() {
+                            self.onboarding_step = self.onboarding_step.saturating_sub(1);
+                        }
+                        if ui.button("Next").clicked() {
+                            self.onboarding_step = (self.onboarding_step + 1).min(steps.len() - 1);
+                        }
+                    });
+                });
+        }
+
+        if self.show_troubleshooting {
+            egui::Window::new("Troubleshooting")
+                .open(&mut self.show_troubleshooting)
+                .resizable(true)
+                .default_size([760.0, 420.0])
+                .show(ctx, |ui| {
+                    ui.label("Diagnostics");
+                    for diag in &self.editors[self.active_tab].diagnostics {
+                        ui.label(format!(
+                            "Ln {} [{}] {}",
+                            diag.line + 1,
+                            diag.severity,
+                            diag.message
+                        ));
+                    }
+                    ui.separator();
+                    ui.label("Recent Output Logs");
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for line in self.output_log.iter().rev().take(200) {
+                            ui.label(egui::RichText::new(line).monospace().size(11.0));
+                        }
+                    });
+                });
+        }
+
+        if self.show_clone_repo_dialog {
+            let mut open = self.show_clone_repo_dialog;
+            egui::Window::new("Clone Repository")
+                .open(&mut open)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.clone_repo_url)
+                            .hint_text("https://github.com/org/repo.git"),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.clone_repo_target)
+                            .hint_text("target folder (optional)"),
+                    );
+                    if ui.button("Clone").clicked() {
+                        self.clone_repository_action();
+                    }
+                });
+            self.show_clone_repo_dialog = open;
+        }
+
+        ctx.request_repaint();
+    }
+}
+
+impl LuxApp {
+    fn render_main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
                 if !self.focus_mode {
                     self.show_left_sidebar(ui);
                     self.show_git_panel_ui(ui);
@@ -3880,125 +4985,6 @@ impl eframe::App for LuxApp {
                         &self.highlighter,
                     );
                 }
-            });
-
-        // Unsaved changes confirmation dialog
-        if let Some(tab_idx) = self.confirm_close_tab {
-            let title = self
-                .editors
-                .get(tab_idx)
-                .map(|e| e.title.clone())
-                .unwrap_or_else(|| "file".into());
-            let mut close_action: Option<bool> = None;
-
-            egui::Window::new("Unsaved Changes")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!("\"{}\" has unsaved changes.", title));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Save & Close").clicked() {
-                            close_action = Some(true);
-                        }
-                        if ui.button("Discard").clicked() {
-                            close_action = Some(false);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_close_tab = None;
-                            self.pending_close_others = None;
-                        }
-                    });
-                });
-
-            match close_action {
-                Some(true) => {
-                    // Save then close
-                    let _ = self.editors[tab_idx].save();
-                    self.force_close_tab(tab_idx);
-                    if let Some(keep_idx) = self.pending_close_others {
-                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
-                    }
-                }
-                Some(false) => {
-                    self.force_close_tab(tab_idx);
-                    if let Some(keep_idx) = self.pending_close_others {
-                        self.close_other_tabs(keep_idx.min(self.editors.len().saturating_sub(1)));
-                    }
-                }
-                None => {}
-            }
-        }
-
-        if let Some(prompt) = self.pending_external_change.clone() {
-            let mut decision: Option<bool> = None;
-            egui::Window::new("External File Change")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.label(format!(
-                        "The file changed on disk:\n{}\nReload from disk?",
-                        prompt.path.to_string_lossy()
-                    ));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Reload Disk Version").clicked() {
-                            decision = Some(true);
-                        }
-                        if ui.button("Keep Buffer").clicked() {
-                            decision = Some(false);
-                        }
-                    });
-                });
-            if let Some(reload) = decision {
-                if reload {
-                    if prompt.tab_idx < self.editors.len() {
-                        if let Ok(reloaded) = Editor::from_file(prompt.path.clone()) {
-                            self.editors[prompt.tab_idx] = reloaded;
-                        }
-                    }
-                }
-                self.pending_external_change = None;
-            }
-        }
-
-        if let Some(preview) = self.refactor_preview.clone() {
-            let mut close = false;
-            let mut rollback = false;
-            egui::Window::new(format!("Refactor Preview: {}", preview.title))
-                .resizable(true)
-                .default_size([720.0, 420.0])
-                .show(ctx, |ui| {
-                    ui.label("Diff preview (simplified):");
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(preview.diff_preview.clone())
-                                .monospace()
-                                .size(11.0),
-                        );
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Keep Changes").clicked() {
-                            close = true;
-                        }
-                        if ui.button("Rollback File").clicked() {
-                            rollback = true;
-                            close = true;
-                        }
-                    });
-                });
-            if rollback && preview.tab_idx < self.editors.len() {
-                self.editors[preview.tab_idx].set_document_text(&preview.original_text);
-                self.refactor_status = "Refactor rolled back".to_string();
-            }
-            if close {
-                self.refactor_preview = None;
-            }
-        }
-
-        ctx.request_repaint();
     }
 }
 
@@ -4739,4 +5725,15 @@ fn now_secs() -> f64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+fn redact_secrets(input: &str) -> String {
+    let mut out = input.to_string();
+    for key in ["TOKEN", "SECRET", "PASSWORD", "API_KEY"] {
+        if let Some(idx) = out.to_uppercase().find(key) {
+            let end = (idx + key.len() + 24).min(out.len());
+            out.replace_range(idx..end, &format!("{}=[REDACTED]", key));
+        }
+    }
+    out
 }

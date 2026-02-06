@@ -18,6 +18,7 @@ pub enum EditorThemeKind {
     Light,
     Monokai,
     SolarizedDark,
+    HighContrast,
 }
 
 impl EditorThemeKind {
@@ -27,6 +28,7 @@ impl EditorThemeKind {
             Self::Light => "Light",
             Self::Monokai => "Monokai",
             Self::SolarizedDark => "Solarized Dark",
+            Self::HighContrast => "High Contrast",
         }
     }
 
@@ -35,6 +37,7 @@ impl EditorThemeKind {
             Self::Dark | Self::Monokai => EditorTheme::monokai(),
             Self::Light => EditorTheme::light(),
             Self::SolarizedDark => EditorTheme::solarized_dark(),
+            Self::HighContrast => EditorTheme::high_contrast(),
         }
     }
 }
@@ -131,6 +134,26 @@ impl EditorTheme {
             cursor: Color32::from_rgb(131, 148, 150),
         }
     }
+
+    pub fn high_contrast() -> Self {
+        Self {
+            background: Color32::from_rgb(0, 0, 0),
+            text: Color32::from_rgb(255, 255, 255),
+            gutter_bg: Color32::from_rgb(0, 0, 0),
+            gutter_divider: Color32::from_rgb(255, 255, 255),
+            selection: Color32::from_rgb(0, 80, 160),
+            gutter_padding: 12.0,
+            minimap_bg: Color32::from_white_alpha(15),
+            minimap_border: Color32::from_rgb(255, 255, 255),
+            minimap_viewport: Color32::from_white_alpha(40),
+            minimap_fg: Color32::from_rgb(255, 255, 255),
+            search_match: Color32::from_rgb(255, 255, 0),
+            active_line: Color32::from_white_alpha(20),
+            line_num_active: Color32::WHITE,
+            line_num: Color32::from_rgb(220, 220, 220),
+            cursor: Color32::from_rgb(255, 255, 255),
+        }
+    }
 }
 
 /// Renders the editor area and handles input. Returns true if content changed.
@@ -213,6 +236,13 @@ pub fn show(
     }
 
     let has_focus = ui.memory(|m| m.has_focus(response.id));
+    if has_focus {
+        ui.painter().rect_stroke(
+            editor_rect,
+            0.0,
+            Stroke::new(1.5, Color32::from_rgb(0, 160, 255)),
+        );
+    }
 
     // Interact with Editor (Clicks)
     if response.clicked() {

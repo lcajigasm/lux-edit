@@ -1,0 +1,49 @@
+name: Release Channels
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "stable | beta | nightly"
+        required: true
+        default: nightly
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      CHANNEL: ${{ github.event.inputs.channel || 'nightly' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Generate changelog
+        run: |
+          git fetch --tags --force
+          bash scripts/changelog.sh > CHANGELOG.auto.md
+      - name: macOS notarization placeholder
+        if: env.CHANNEL == 'stable'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          echo "Notarization step configured via secrets (placeholder command)."
+      - name: Windows code signing placeholder
+        if: env.CHANNEL == 'stable'
+        env:
+          WINDOWS_CERT_B64: ${{ secrets.WINDOWS_CERT_B64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          echo "Windows signing step configured via secrets (placeholder command)."
+      - name: Upload release channel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-edit-${{ env.CHANNEL }}
+          path: |
+            target/release/lux-edit*
+            CHANGELOG.auto.md
+

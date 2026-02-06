@@ -2,18 +2,33 @@
 
 A fast, free text editor inspired by Sublime Text, built with Rust and egui.
 
+## Documentation
+
+Project documentation lives in [`/docs`](./docs/README.md):
+
+- [Docs Index](./docs/README.md)
+- [Feature Overview](./docs/FEATURES.md)
+- [User Guide](./docs/USER_GUIDE.md)
+- [Configuration](./docs/CONFIGURATION.md)
+- [Compatibility](./docs/COMPATIBILITY.md)
+- [Architecture](./docs/ARCHITECTURE.md)
+- [Development](./docs/DEVELOPMENT.md)
+
 ## Features
 
 - **Fast and Lightweight**: Built with Rust for maximum performance
-- **Syntax Highlighting**: Supports multiple programming languages with syntax highlighting powered by syntect
-- **Multiple Tabs**: Work with multiple files simultaneously using tabs
-- **Command Palette**: Quick access to all commands with `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS)
-- **Find and Replace**: Search text and replace with `Ctrl+F` and `Ctrl+H`
-- **Go to Line**: Jump to any line with `Ctrl+G`
+- **Syntax Highlighting**: Multiple language grammars powered by syntect
+- **Multi-Panel Layout**: Explorer/Search/Git/Debug sidebars and dock panels
+- **Command Palette**: Quick access to commands with `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS)
+- **Search and Navigation**: Find/replace, go to line, symbol and workspace search
+- **LSP and Formatting**: Diagnostics, completion, references, definitions, formatting hooks
+- **Compatibility**: Imports VSCode/Sublime/JetBrains settings and applies project conventions
 - **Clipboard Integration**: Full copy, paste, and cut support
 - **File Management**: Open, save, and save as functionality
 - **Modified File Detection**: Visual indicators for unsaved changes
 - **Undo/Redo**: Full undo and redo support
+
+For a full breakdown, see [Feature Overview](./docs/FEATURES.md).
 
 ## Installation
 
@@ -32,7 +47,11 @@ To build Lux Editor from source, you'll need to have Rust installed. If you don'
    cargo run --release
    ```
 
+For more workflows (checks, tests, CI), see [Development](./docs/DEVELOPMENT.md).
+
 ## Usage
+
+For a complete walkthrough, see [User Guide](./docs/USER_GUIDE.md).
 
 ### Keyboard Shortcuts
 
@@ -71,6 +90,8 @@ Lux Editor is built with the following key dependencies:
 - **[rfd](https://github.com/PolyMeilex/rfd)** (v0.15) - Native file dialogs
 - **[arboard](https://github.com/1Password/arboard)** (v3.4) - Clipboard support
 
+See [Architecture](./docs/ARCHITECTURE.md) for module-level implementation references.
+
 ## Contributing
 
 Contributions are welcome! If you'd like to contribute to Lux Editor:
@@ -80,6 +101,8 @@ Contributions are welcome! If you'd like to contribute to Lux Editor:
 3. Make your changes
 4. Test your changes thoroughly
 5. Submit a pull request
+
+Please update relevant docs under [`/docs`](./docs/README.md) when behavior changes.
 
 ## License
 
