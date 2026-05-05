@@ -1,12 +1,9 @@
 mod app;
 mod editor;
-mod git;
 mod lsp;
 mod plugin;
-mod session;
 mod syntax;
 mod ui;
-mod utils;
 
 use app::LuxApp;
 use eframe::egui;

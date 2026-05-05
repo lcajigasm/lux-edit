@@ -548,12 +548,10 @@ fn handle_keyboard(
 
     for event in events {
         match event {
-            egui::Event::Text(text) => {
-                if !ui.input(|i| i.modifiers.command) {
-                    editor.insert_text(&text);
-                    editor.completion_visible = false;
-                    changed = true;
-                }
+            egui::Event::Text(text) if !ui.input(|i| i.modifiers.command) => {
+                editor.insert_text(&text);
+                editor.completion_visible = false;
+                changed = true;
             }
             egui::Event::Copy => {
                 let text = editor.copy_text();
@@ -570,11 +568,9 @@ fn handle_keyboard(
                 }
                 changed = true;
             }
-            egui::Event::Paste(text) => {
-                if !text.is_empty() {
-                    editor.insert_text(&text);
-                    changed = true;
-                }
+            egui::Event::Paste(text) if !text.is_empty() => {
+                editor.insert_text(&text);
+                changed = true;
             }
             egui::Event::Key {
                 key,
@@ -691,15 +687,13 @@ fn handle_keyboard(
                 egui::Key::PageDown => editor.move_page_down(modifiers.shift, visible_lines_count),
                 egui::Key::Home => editor.move_home(modifiers.shift),
                 egui::Key::End => editor.move_end(modifiers.shift),
-                egui::Key::Tab => {
-                    if !modifiers.shift {
-                        if editor.completion_visible {
-                            editor.apply_completion(0);
-                        } else {
-                            editor.insert_tab();
-                        }
-                        changed = true;
+                egui::Key::Tab if !modifiers.shift => {
+                    if editor.completion_visible {
+                        editor.apply_completion(0);
+                    } else {
+                        editor.insert_tab();
                     }
+                    changed = true;
                 }
                 egui::Key::Space if modifiers.command => {
                     editor.request_completion = true;

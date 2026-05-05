@@ -318,7 +318,7 @@ impl LuxApp {
                 }
             }
         }
-        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.sort_by_key(|b| std::cmp::Reverse(b.0));
         self.sidebar_symbol_results = ranked.into_iter().take(300).map(|(_, s)| s).collect();
     }
 
