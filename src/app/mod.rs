@@ -901,8 +901,7 @@ impl eframe::App for LuxApp {
         let mut visuals = egui::Visuals::dark();
         visuals.override_text_color = None;
         visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(240, 180, 66, 55);
-        visuals.selection.stroke =
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
         visuals.widgets.active.bg_stroke =
             egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
         visuals.widgets.hovered.bg_stroke =

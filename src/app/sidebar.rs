@@ -182,10 +182,7 @@ fn draw_icon_explorer(p: &egui::Painter, rect: egui::Rect, color: egui::Color32)
     for i in 0..3_i32 {
         let y = c.y - 1.0 + i as f32 * 3.5;
         p.line_segment(
-            [
-                egui::Pos2::new(c.x - 3.5, y),
-                egui::Pos2::new(c.x + 2.5, y),
-            ],
+            [egui::Pos2::new(c.x - 3.5, y), egui::Pos2::new(c.x + 2.5, y)],
             thin,
         );
     }
@@ -307,10 +304,9 @@ impl LuxApp {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    let resp =
-                        activity_icon(ui, false, "Manage", |p, rect, color| {
-                            draw_icon_settings(p, rect, color);
-                        });
+                    let resp = activity_icon(ui, false, "Manage", |p, rect, color| {
+                        draw_icon_settings(p, rect, color);
+                    });
                     if resp.clicked() {
                         self.show_help_window = true;
                     }
@@ -480,22 +476,23 @@ impl LuxApp {
                         egui::ScrollArea::vertical()
                             .id_salt("sidebar_search_results")
                             .show(ui, |ui| {
-                            for hit in self.sidebar_search_results.clone() {
-                                let selected = self
-                                    .sidebar_search_selected
-                                    .as_deref()
-                                    .map(|s| s == hit.as_str())
-                                    .unwrap_or(false);
-                                if ui.selectable_label(selected, &hit).clicked() {
-                                    self.sidebar_search_selected = Some(hit.clone());
-                                    self.update_search_preview(&hit);
-                                    if let Some((path, _line)) = parse_search_hit_location(&hit) {
-                                        let full_path = self.workspace_join(&path);
-                                        self.open_path_in_tab(full_path.as_path());
+                                for hit in self.sidebar_search_results.clone() {
+                                    let selected = self
+                                        .sidebar_search_selected
+                                        .as_deref()
+                                        .map(|s| s == hit.as_str())
+                                        .unwrap_or(false);
+                                    if ui.selectable_label(selected, &hit).clicked() {
+                                        self.sidebar_search_selected = Some(hit.clone());
+                                        self.update_search_preview(&hit);
+                                        if let Some((path, _line)) = parse_search_hit_location(&hit)
+                                        {
+                                            let full_path = self.workspace_join(&path);
+                                            self.open_path_in_tab(full_path.as_path());
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
                         if !self.sidebar_search_preview.is_empty() {
                             ui.separator();
                             ui.label("Preview");
