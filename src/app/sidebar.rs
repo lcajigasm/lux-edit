@@ -477,23 +477,26 @@ impl LuxApp {
                         if !self.sidebar_search_message.is_empty() {
                             ui.label(self.sidebar_search_message.clone());
                         }
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for hit in self.sidebar_search_results.clone() {
-                                let selected = self
-                                    .sidebar_search_selected
-                                    .as_deref()
-                                    .map(|s| s == hit.as_str())
-                                    .unwrap_or(false);
-                                if ui.selectable_label(selected, &hit).clicked() {
-                                    self.sidebar_search_selected = Some(hit.clone());
-                                    self.update_search_preview(&hit);
-                                    if let Some((path, _line)) = parse_search_hit_location(&hit) {
-                                        let full_path = self.workspace_join(&path);
-                                        self.open_path_in_tab(full_path.as_path());
+                        egui::ScrollArea::vertical()
+                            .id_salt("sidebar_search_results")
+                            .show(ui, |ui| {
+                                for hit in self.sidebar_search_results.clone() {
+                                    let selected = self
+                                        .sidebar_search_selected
+                                        .as_deref()
+                                        .map(|s| s == hit.as_str())
+                                        .unwrap_or(false);
+                                    if ui.selectable_label(selected, &hit).clicked() {
+                                        self.sidebar_search_selected = Some(hit.clone());
+                                        self.update_search_preview(&hit);
+                                        if let Some((path, _line)) = parse_search_hit_location(&hit)
+                                        {
+                                            let full_path = self.workspace_join(&path);
+                                            self.open_path_in_tab(full_path.as_path());
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
                         if !self.sidebar_search_preview.is_empty() {
                             ui.separator();
                             ui.label("Preview");
@@ -517,6 +520,7 @@ impl LuxApp {
                             self.run_symbol_search();
                         }
                         egui::ScrollArea::vertical()
+                            .id_salt("sidebar_symbol_results")
                             .max_height(120.0)
                             .show(ui, |ui| {
                                 for symbol in self.sidebar_symbol_results.clone() {
@@ -531,6 +535,7 @@ impl LuxApp {
                         ui.separator();
                         ui.label("LSP Navigation Results");
                         egui::ScrollArea::vertical()
+                            .id_salt("sidebar_lsp_nav_results")
                             .max_height(110.0)
                             .show(ui, |ui| {
                                 for nav in self.editors[self.active_tab].lsp_nav_results.clone() {

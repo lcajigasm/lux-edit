@@ -93,6 +93,7 @@ impl LuxApp {
                 ui.separator();
                 ui.label("Changed files");
                 egui::ScrollArea::vertical()
+                    .id_salt("git_changed_files")
                     .max_height(170.0)
                     .show(ui, |ui| {
                         for file in self.git_panel.files.clone() {
@@ -131,6 +132,7 @@ impl LuxApp {
                 ui.separator();
                 ui.label("Diff");
                 egui::ScrollArea::vertical()
+                    .id_salt("git_diff_view")
                     .max_height(210.0)
                     .show(ui, |ui| {
                         ui.label(
@@ -143,6 +145,7 @@ impl LuxApp {
                 ui.separator();
                 ui.label("Recent commits");
                 egui::ScrollArea::vertical()
+                    .id_salt("git_recent_commits")
                     .max_height(110.0)
                     .show(ui, |ui| {
                         for commit in &self.git_panel.commits {

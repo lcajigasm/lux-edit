@@ -897,8 +897,22 @@ impl LuxApp {
 
 impl eframe::App for LuxApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Dark theme
-        ctx.set_visuals(egui::Visuals::dark());
+        // Lux Dark visuals — amber accent, no cyan focus rings
+        let mut visuals = egui::Visuals::dark();
+        visuals.override_text_color = None;
+        visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(240, 180, 66, 55);
+        visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
+        visuals.widgets.active.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
+        visuals.widgets.hovered.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 120, 155));
+        visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 58));
+        visuals.widgets.open.bg_stroke =
+            egui::Stroke::new(1.0, egui::Color32::from_rgb(240, 180, 66));
+        visuals.window_fill = egui::Color32::from_rgb(18, 18, 27);
+        visuals.panel_fill = egui::Color32::from_rgb(18, 18, 27);
+        ctx.set_visuals(visuals);
         let native_scale = ctx.native_pixels_per_point().unwrap_or(1.0);
         ctx.set_pixels_per_point((native_scale * self.theme_ui_density).clamp(0.75, 4.0));
 
