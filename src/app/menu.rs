@@ -1,5 +1,5 @@
-use eframe::egui;
 use super::*;
+use eframe::egui;
 
 impl LuxApp {
     pub(super) fn show_menu_bar(&mut self, ctx: &egui::Context) {

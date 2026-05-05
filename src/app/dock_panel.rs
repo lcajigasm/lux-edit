@@ -1,5 +1,5 @@
-use eframe::egui;
 use super::*;
+use eframe::egui;
 
 impl LuxApp {
     pub(super) fn render_dock_panel_contents(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -107,7 +107,8 @@ impl LuxApp {
                     );
                     if ui.button("Copy Visible").clicked() {
                         let visible: String = self
-                            .terminal.output_log
+                            .terminal
+                            .output_log
                             .iter()
                             .filter(|line| {
                                 self.terminal.output_filter.trim().is_empty()
@@ -1156,9 +1157,13 @@ impl LuxApp {
     pub(super) fn handle_command(&mut self, cmd: CommandId) {
         self.log_event("command", LogLevel::Debug, &format!("{:?}", cmd));
         if self.telemetry_opt_in {
-            self.terminal.output_log.push(format!("telemetry.command {:?}", cmd));
+            self.terminal
+                .output_log
+                .push(format!("telemetry.command {:?}", cmd));
             if self.terminal.output_log.len() > 400 {
-                self.terminal.output_log.drain(0..(self.terminal.output_log.len() - 400));
+                self.terminal
+                    .output_log
+                    .drain(0..(self.terminal.output_log.len() - 400));
             }
         }
         match cmd {
