@@ -14,13 +14,13 @@ use crate::ui::command_palette::{CommandId, CommandPalette};
 use crate::ui::editor_view::{EditorFontSettings, EditorThemeKind, FontFamilyKind};
 use crate::ui::markdown_preview;
 
-mod git_panel;
-mod sidebar;
 mod dock_panel;
+mod git_panel;
 mod menu;
-mod tabs;
-mod search_bars;
 mod render;
+mod search_bars;
+mod sidebar;
+mod tabs;
 
 pub(super) const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(36, 37, 38);
 pub(super) const MENU_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 47);

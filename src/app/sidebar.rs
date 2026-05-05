@@ -1,5 +1,5 @@
-use eframe::egui;
 use super::*;
+use eframe::egui;
 
 fn render_file_tree(
     ui: &mut egui::Ui,
@@ -12,12 +12,17 @@ fn render_file_tree(
     let rel_paths: Vec<PathBuf> = files
         .iter()
         .filter_map(|f| f.strip_prefix(workspace_root).ok().map(|r| r.to_path_buf()))
-        .filter(|r| {
-            filter.is_empty()
-                || r.to_string_lossy().to_lowercase().contains(filter)
-        })
+        .filter(|r| filter.is_empty() || r.to_string_lossy().to_lowercase().contains(filter))
         .collect();
-    render_tree_level(ui, workspace_root, &rel_paths, Path::new(""), 0, expanded_dirs, &mut opened);
+    render_tree_level(
+        ui,
+        workspace_root,
+        &rel_paths,
+        Path::new(""),
+        0,
+        expanded_dirs,
+        &mut opened,
+    );
     opened
 }
 
@@ -75,7 +80,15 @@ fn render_tree_level(
             }
         });
         if expanded {
-            render_tree_level(ui, workspace_root, rel_paths, dir, depth + 1, expanded_dirs, opened);
+            render_tree_level(
+                ui,
+                workspace_root,
+                rel_paths,
+                dir,
+                depth + 1,
+                expanded_dirs,
+                opened,
+            );
         }
     }
 
@@ -257,15 +270,17 @@ impl LuxApp {
                         let filter = self.quick_open_query.trim().to_lowercase();
                         let files_snap = self.sidebar_files.clone();
                         let root_snap = self.workspace_root.clone();
-                        let opened = egui::ScrollArea::vertical().show(ui, |ui| {
-                            render_file_tree(
-                                ui,
-                                &root_snap,
-                                &files_snap,
-                                &mut self.sidebar_expanded_dirs,
-                                &filter,
-                            )
-                        }).inner;
+                        let opened = egui::ScrollArea::vertical()
+                            .show(ui, |ui| {
+                                render_file_tree(
+                                    ui,
+                                    &root_snap,
+                                    &files_snap,
+                                    &mut self.sidebar_expanded_dirs,
+                                    &filter,
+                                )
+                            })
+                            .inner;
                         if let Some(path) = opened {
                             self.open_path_in_tab(path.as_path());
                         }
@@ -494,7 +509,11 @@ impl LuxApp {
                                 self.runner.run_configs.push(RunConfiguration {
                                     name,
                                     command,
-                                    env_overrides: self.runner.new_run_config_env.trim().to_string(),
+                                    env_overrides: self
+                                        .runner
+                                        .new_run_config_env
+                                        .trim()
+                                        .to_string(),
                                 });
                                 self.runner.new_run_config_name.clear();
                                 self.runner.new_run_config_command.clear();
@@ -531,7 +550,8 @@ impl LuxApp {
                                 let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
                                 let note = self.collab.note_input.trim().to_string();
                                 if !note.is_empty() {
-                                    self.collab.notes
+                                    self.collab
+                                        .notes
                                         .entry(path)
                                         .or_default()
                                         .push((line, note));
@@ -577,7 +597,8 @@ impl LuxApp {
             return;
         }
         let profile = self
-            .terminal.profiles
+            .terminal
+            .profiles
             .get(self.terminal.profile_idx)
             .cloned()
             .unwrap_or(TerminalProfile {
@@ -586,10 +607,12 @@ impl LuxApp {
                 theme_hint: "Dark".to_string(),
             });
         if secondary {
-            self.terminal.log_secondary
+            self.terminal
+                .log_secondary
                 .push(format!("[{}] $ {}", profile.name, command));
         } else {
-            self.terminal.log
+            self.terminal
+                .log
                 .push(format!("[{}] $ {}", profile.name, command));
         }
         let target = if secondary {

@@ -1,5 +1,5 @@
-use eframe::egui;
 use super::*;
+use eframe::egui;
 
 impl LuxApp {
     pub(super) fn show_git_panel_ui(&mut self, ui: &mut egui::Ui) {

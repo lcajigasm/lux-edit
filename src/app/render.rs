@@ -1,5 +1,5 @@
-use eframe::egui;
 use super::*;
+use eframe::egui;
 
 impl LuxApp {
     pub(super) fn render_main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -206,4 +206,3 @@ impl LuxApp {
         }
     }
 }
-
