@@ -268,9 +268,9 @@ impl CommandPalette {
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::none()
-                    .fill(egui::Color32::from_rgb(40, 40, 40))
-                    .rounding(egui::Rounding::same(8.0))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 70, 70)))
+                    .fill(egui::Color32::from_rgb(20, 20, 30))
+                    .rounding(egui::Rounding::same(10.0))
+                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 75)))
                     .inner_margin(egui::Margin::same(8.0))
                     .show(ui, |ui| {
                         ui.set_width(palette_width);
@@ -352,7 +352,7 @@ impl CommandPalette {
                                 for (i, (cmd, _score)) in filtered.iter().enumerate() {
                                     let is_selected = i == self.selected;
                                     let bg = if is_selected {
-                                        egui::Color32::from_rgb(55, 55, 75)
+                                        egui::Color32::from_rgba_premultiplied(240, 180, 66, 25)
                                     } else {
                                         egui::Color32::TRANSPARENT
                                     };

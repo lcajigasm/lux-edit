@@ -14,6 +14,7 @@ const MINIMAP_CHAR_HEIGHT: f32 = 2.0; // Usually matches line height
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorThemeKind {
+    LuxDark,
     Dark,
     Light,
     Monokai,
@@ -24,6 +25,7 @@ pub enum EditorThemeKind {
 impl EditorThemeKind {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::LuxDark => "Lux Dark",
             Self::Dark => "Dark",
             Self::Light => "Light",
             Self::Monokai => "Monokai",
@@ -34,6 +36,7 @@ impl EditorThemeKind {
 
     pub fn palette(&self) -> EditorTheme {
         match self {
+            Self::LuxDark => EditorTheme::lux_dark(),
             Self::Dark | Self::Monokai => EditorTheme::monokai(),
             Self::Light => EditorTheme::light(),
             Self::SolarizedDark => EditorTheme::solarized_dark(),
@@ -75,6 +78,26 @@ pub struct EditorTheme {
 }
 
 impl EditorTheme {
+    pub fn lux_dark() -> Self {
+        Self {
+            background: Color32::from_rgb(18, 18, 27),
+            text: Color32::from_rgb(210, 210, 230),
+            gutter_bg: Color32::from_rgb(14, 14, 21),
+            gutter_divider: Color32::from_rgb(35, 35, 52),
+            selection: Color32::from_rgba_premultiplied(240, 180, 66, 45),
+            gutter_padding: 14.0,
+            minimap_bg: Color32::from_black_alpha(40),
+            minimap_border: Color32::from_rgba_premultiplied(40, 40, 60, 255),
+            minimap_viewport: Color32::from_white_alpha(18),
+            minimap_fg: Color32::from_rgb(180, 180, 210),
+            search_match: Color32::from_rgb(180, 120, 20),
+            active_line: Color32::from_white_alpha(12),
+            line_num_active: Color32::from_rgb(240, 180, 66),
+            line_num: Color32::from_rgb(70, 70, 100),
+            cursor: Color32::from_rgb(240, 180, 66),
+        }
+    }
+
     pub fn light() -> Self {
         Self {
             background: Color32::WHITE,

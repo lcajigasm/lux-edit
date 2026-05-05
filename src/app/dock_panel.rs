@@ -814,10 +814,11 @@ impl LuxApp {
         };
         if let Some(kind) = value.get("theme_kind").and_then(|v| v.as_str()) {
             self.editor_theme = match kind {
+                "Lux Dark" => EditorThemeKind::LuxDark,
                 "Dark" => EditorThemeKind::Dark,
                 "Light" => EditorThemeKind::Light,
                 "Solarized Dark" => EditorThemeKind::SolarizedDark,
-                _ => EditorThemeKind::Monokai,
+                _ => EditorThemeKind::LuxDark,
             };
         }
         if let Some(density) = value.get("ui_density").and_then(|v| v.as_f64()) {

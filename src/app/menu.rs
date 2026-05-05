@@ -355,6 +355,7 @@ impl LuxApp {
 
                     ui.menu_button(rich_label("Theme"), |ui| {
                         for theme_option in [
+                            EditorThemeKind::LuxDark,
                             EditorThemeKind::Dark,
                             EditorThemeKind::Light,
                             EditorThemeKind::Monokai,

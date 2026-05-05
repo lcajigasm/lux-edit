@@ -12,8 +12,8 @@ enum MdBlock {
 
 pub fn show(ui: &mut egui::Ui, markdown: &str) {
     let blocks = parse_markdown(markdown);
-    let bg = egui::Color32::from_rgb(30, 30, 32);
-    let border = egui::Color32::from_rgb(52, 52, 55);
+    let bg = egui::Color32::from_rgb(18, 18, 27);
+    let border = egui::Color32::from_rgb(40, 40, 58);
 
     egui::Frame::none()
         .fill(bg)
