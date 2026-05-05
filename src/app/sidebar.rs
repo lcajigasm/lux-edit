@@ -111,6 +111,165 @@ fn render_tree_level(
     }
 }
 
+// --- Activity bar icon drawing ---
+
+fn activity_icon(
+    ui: &mut egui::Ui,
+    selected: bool,
+    hint: &str,
+    draw_fn: impl FnOnce(&egui::Painter, egui::Rect, egui::Color32),
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::Vec2::new(40.0, 40.0), egui::Sense::click());
+
+    let hovered = resp.hovered();
+    if selected {
+        ui.painter().rect_filled(
+            rect,
+            5.0,
+            egui::Color32::from_rgba_premultiplied(240, 180, 66, 22),
+        );
+        // Left accent bar
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                egui::Pos2::new(rect.left(), rect.center().y - 10.0),
+                egui::Vec2::new(2.0, 20.0),
+            ),
+            0.0,
+            ACCENT_COLOR,
+        );
+    } else if hovered {
+        ui.painter()
+            .rect_filled(rect, 5.0, egui::Color32::from_white_alpha(10));
+    }
+
+    let icon_color = if selected {
+        ACCENT_COLOR
+    } else if hovered {
+        egui::Color32::from_rgb(185, 185, 215)
+    } else {
+        egui::Color32::from_rgb(95, 95, 125)
+    };
+
+    draw_fn(ui.painter(), rect, icon_color);
+    resp.on_hover_text(hint)
+}
+
+fn draw_icon_explorer(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = egui::Stroke::new(1.5, color);
+    let w = 10.0_f32;
+    let h = 13.0_f32;
+    let fold = 3.5_f32;
+
+    // Document with folded top-right corner
+    let tl = egui::Pos2::new(c.x - w / 2.0, c.y - h / 2.0);
+    let tr = egui::Pos2::new(c.x + w / 2.0 - fold, c.y - h / 2.0);
+    let fc = egui::Pos2::new(c.x + w / 2.0, c.y - h / 2.0 + fold);
+    let br = egui::Pos2::new(c.x + w / 2.0, c.y + h / 2.0);
+    let bl = egui::Pos2::new(c.x - w / 2.0, c.y + h / 2.0);
+
+    p.line_segment([tl, tr], s);
+    p.line_segment([tr, fc], s);
+    p.line_segment([fc, br], s);
+    p.line_segment([br, bl], s);
+    p.line_segment([bl, tl], s);
+    // Fold crease
+    p.line_segment([tr, egui::Pos2::new(tr.x, fc.y)], s);
+    p.line_segment([egui::Pos2::new(tr.x, fc.y), fc], s);
+
+    // Three lines inside the document
+    let thin = egui::Stroke::new(1.0, color);
+    for i in 0..3_i32 {
+        let y = c.y - 1.0 + i as f32 * 3.5;
+        p.line_segment(
+            [
+                egui::Pos2::new(c.x - 3.5, y),
+                egui::Pos2::new(c.x + 2.5, y),
+            ],
+            thin,
+        );
+    }
+}
+
+fn draw_icon_search(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = egui::Stroke::new(1.5, color);
+    let offset = egui::Vec2::new(-1.5, -1.5);
+    let r = 6.0_f32;
+
+    p.circle_stroke(c + offset, r, s);
+
+    let handle_start = c + offset + egui::Vec2::new(r * 0.707, r * 0.707);
+    let handle_end = handle_start + egui::Vec2::new(3.5, 3.5);
+    p.line_segment([handle_start, handle_end], s);
+}
+
+fn draw_icon_git(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = egui::Stroke::new(1.5, color);
+    let r = 2.5_f32;
+
+    // Three commit nodes in a Y-branch layout
+    let main_lo = egui::Pos2::new(c.x - 3.5, c.y + 7.0);
+    let main_hi = egui::Pos2::new(c.x - 3.5, c.y - 7.0);
+    let branch = egui::Pos2::new(c.x + 4.5, c.y);
+
+    // Trunk line
+    p.line_segment([main_lo, main_hi], s);
+    // Branch line from trunk midpoint to branch node
+    let branch_root = egui::Pos2::new(c.x - 3.5, c.y + 1.0);
+    p.line_segment([branch_root, branch], s);
+
+    p.circle_filled(main_lo, r, color);
+    p.circle_filled(main_hi, r, color);
+    p.circle_filled(branch, r, color);
+}
+
+fn draw_icon_debug(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    // Filled right-pointing triangle (play/run)
+    let pts = vec![
+        egui::Pos2::new(c.x - 5.0, c.y - 8.0),
+        egui::Pos2::new(c.x + 6.5, c.y),
+        egui::Pos2::new(c.x - 5.0, c.y + 8.0),
+    ];
+    p.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
+}
+
+fn draw_icon_collab(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = egui::Stroke::new(1.5, color);
+
+    // Two overlapping speech bubbles
+    let b1 = egui::Rect::from_center_size(
+        egui::Pos2::new(c.x + 1.5, c.y - 1.5),
+        egui::Vec2::new(13.0, 10.0),
+    );
+    p.rect_stroke(b1, 3.0, s);
+
+    let b2 = egui::Rect::from_center_size(
+        egui::Pos2::new(c.x - 2.5, c.y + 2.5),
+        egui::Vec2::new(13.0, 10.0),
+    );
+    p.rect_stroke(b2, 3.0, s);
+}
+
+fn draw_icon_settings(p: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let c = rect.center();
+    let s = egui::Stroke::new(1.5, color);
+    let w = 13.0_f32;
+
+    for dy in [-4.5_f32, 0.0, 4.5] {
+        p.line_segment(
+            [
+                egui::Pos2::new(c.x - w / 2.0, c.y + dy),
+                egui::Pos2::new(c.x + w / 2.0, c.y + dy),
+            ],
+            s,
+        );
+    }
+}
+
 impl LuxApp {
     pub(super) fn show_activity_bar(&mut self, ui: &mut egui::Ui) {
         egui::SidePanel::left("activity_bar")
@@ -122,23 +281,23 @@ impl LuxApp {
                     .inner_margin(egui::Margin::symmetric(4.0, 8.0)),
             )
             .show_inside(ui, |ui| {
-                let tabs = [
-                    (SidebarTab::Explorer, "E"),
-                    (SidebarTab::Search, "S"),
-                    (SidebarTab::Git, "G"),
-                    (SidebarTab::Debug, "D"),
-                    (SidebarTab::Collab, "C"),
+                let tabs: &[(SidebarTab, &str)] = &[
+                    (SidebarTab::Explorer, "Explorer"),
+                    (SidebarTab::Search, "Search"),
+                    (SidebarTab::Git, "Source Control"),
+                    (SidebarTab::Debug, "Debug"),
+                    (SidebarTab::Collab, "Collaborate"),
                 ];
-                for (tab, icon) in tabs {
+                for &(tab, hint) in tabs {
                     let selected = self.show_sidebar && self.sidebar_tab == tab;
-                    let label = egui::RichText::new(icon).monospace().size(14.0).strong();
-                    let button = egui::SelectableLabel::new(selected, label);
-                    let response = ui.add_sized([36.0, 34.0], button).on_hover_text(format!(
-                        "{} ({})",
-                        Self::sidebar_tab_title(tab),
-                        Self::sidebar_tab_hint(tab)
-                    ));
-                    if response.clicked() {
+                    let resp = activity_icon(ui, selected, hint, |p, rect, color| match tab {
+                        SidebarTab::Explorer => draw_icon_explorer(p, rect, color),
+                        SidebarTab::Search => draw_icon_search(p, rect, color),
+                        SidebarTab::Git => draw_icon_git(p, rect, color),
+                        SidebarTab::Debug => draw_icon_debug(p, rect, color),
+                        SidebarTab::Collab => draw_icon_collab(p, rect, color),
+                    });
+                    if resp.clicked() {
                         if self.show_sidebar && self.sidebar_tab == tab {
                             self.show_sidebar = false;
                         } else {
@@ -148,11 +307,11 @@ impl LuxApp {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    if ui
-                        .add_sized([36.0, 30.0], egui::Button::new("..."))
-                        .on_hover_text("Manage")
-                        .clicked()
-                    {
+                    let resp =
+                        activity_icon(ui, false, "Manage", |p, rect, color| {
+                            draw_icon_settings(p, rect, color);
+                        });
+                    if resp.clicked() {
                         self.show_help_window = true;
                     }
                 });
