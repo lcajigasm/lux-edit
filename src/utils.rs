@@ -214,7 +214,7 @@ pub fn build_code_lens_metrics(editor: &Editor) -> Vec<CodeLensMetric> {
     metrics
 }
 
-fn looks_like_symbol_header(line: &str) -> bool {
+pub(crate) fn looks_like_symbol_header(line: &str) -> bool {
     if line.is_empty() {
         return false;
     }
