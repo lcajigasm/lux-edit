@@ -1,6 +1,103 @@
 use eframe::egui;
 use super::*;
 
+fn render_file_tree(
+    ui: &mut egui::Ui,
+    workspace_root: &Path,
+    files: &[PathBuf],
+    expanded_dirs: &mut HashSet<PathBuf>,
+    filter: &str,
+) -> Option<PathBuf> {
+    let mut opened: Option<PathBuf> = None;
+    let rel_paths: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|f| f.strip_prefix(workspace_root).ok().map(|r| r.to_path_buf()))
+        .filter(|r| {
+            filter.is_empty()
+                || r.to_string_lossy().to_lowercase().contains(filter)
+        })
+        .collect();
+    render_tree_level(ui, workspace_root, &rel_paths, Path::new(""), 0, expanded_dirs, &mut opened);
+    opened
+}
+
+fn render_tree_level(
+    ui: &mut egui::Ui,
+    workspace_root: &Path,
+    rel_paths: &[PathBuf],
+    current_dir: &Path,
+    depth: usize,
+    expanded_dirs: &mut HashSet<PathBuf>,
+    opened: &mut Option<PathBuf>,
+) {
+    let indent = depth as f32 * 14.0;
+
+    let mut seen_dirs: Vec<PathBuf> = Vec::new();
+    let mut direct_files: Vec<&PathBuf> = Vec::new();
+
+    for rel in rel_paths {
+        let within = match rel.strip_prefix(current_dir) {
+            Ok(w) if !w.as_os_str().is_empty() => w,
+            _ => continue,
+        };
+        let mut comps = within.components();
+        if let Some(first) = comps.next() {
+            let child_path = current_dir.join(first);
+            if comps.next().is_some() {
+                if !seen_dirs.contains(&child_path) {
+                    seen_dirs.push(child_path);
+                }
+            } else {
+                direct_files.push(rel);
+            }
+        }
+    }
+
+    for dir in &seen_dirs {
+        let abs_dir = workspace_root.join(dir);
+        let expanded = expanded_dirs.contains(&abs_dir);
+        let dir_name = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let icon = if expanded { "▾" } else { "▸" };
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            if ui
+                .selectable_label(false, format!("{} {}", icon, dir_name))
+                .clicked()
+            {
+                if expanded {
+                    expanded_dirs.remove(&abs_dir);
+                } else {
+                    expanded_dirs.insert(abs_dir);
+                }
+            }
+        });
+        if expanded {
+            render_tree_level(ui, workspace_root, rel_paths, dir, depth + 1, expanded_dirs, opened);
+        }
+    }
+
+    for rel in direct_files {
+        let abs = workspace_root.join(rel);
+        let name = rel
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| rel.to_string_lossy().to_string());
+        let icon = file_icon(abs.as_path());
+        ui.horizontal(|ui| {
+            ui.add_space(indent + 14.0);
+            if ui
+                .selectable_label(false, format!("{} {}", icon, name))
+                .clicked()
+            {
+                *opened = Some(abs);
+            }
+        });
+    }
+}
+
 impl LuxApp {
     pub(super) fn show_activity_bar(&mut self, ui: &mut egui::Ui) {
         egui::SidePanel::left("activity_bar")
@@ -158,21 +255,20 @@ impl LuxApp {
                             ui.label(self.file_ops_message.clone());
                         }
                         let filter = self.quick_open_query.trim().to_lowercase();
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for file in self.sidebar_files.clone() {
-                                let label = file.to_string_lossy().to_string();
-                                if !filter.is_empty() && !label.to_lowercase().contains(&filter) {
-                                    continue;
-                                }
-                                let icon = file_icon(file.as_path());
-                                if ui
-                                    .selectable_label(false, format!("{} {}", icon, label))
-                                    .clicked()
-                                {
-                                    self.open_path_in_tab(file.as_path());
-                                }
-                            }
-                        });
+                        let files_snap = self.sidebar_files.clone();
+                        let root_snap = self.workspace_root.clone();
+                        let opened = egui::ScrollArea::vertical().show(ui, |ui| {
+                            render_file_tree(
+                                ui,
+                                &root_snap,
+                                &files_snap,
+                                &mut self.sidebar_expanded_dirs,
+                                &filter,
+                            )
+                        }).inner;
+                        if let Some(path) = opened {
+                            self.open_path_in_tab(path.as_path());
+                        }
                     }
                     SidebarTab::Search => {
                         let resp = ui.add(
@@ -304,7 +400,7 @@ impl LuxApp {
                             self.add_breakpoint_at_cursor();
                         }
                         ui.label("Breakpoints");
-                        for (path, lines) in self.debug_breakpoints.clone() {
+                        for (path, lines) in self.debug.breakpoints.clone() {
                             for line in lines {
                                 ui.label(format!("{}:{}", path.to_string_lossy(), line));
                             }
@@ -312,29 +408,29 @@ impl LuxApp {
                         ui.separator();
                         ui.horizontal(|ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.debug_watch_input)
+                                egui::TextEdit::singleline(&mut self.debug.watch_input)
                                     .hint_text("Watch expression"),
                             );
                             if ui.button("Add Watch").clicked() {
-                                let watch = self.debug_watch_input.trim().to_string();
+                                let watch = self.debug.watch_input.trim().to_string();
                                 if !watch.is_empty() {
-                                    self.debug_watches.push(watch);
-                                    self.debug_watch_input.clear();
+                                    self.debug.watches.push(watch);
+                                    self.debug.watch_input.clear();
                                 }
                             }
                         });
-                        for watch in self.debug_watches.clone() {
+                        for watch in self.debug.watches.clone() {
                             ui.label(format!("watch: {}", watch));
                         }
                         ui.separator();
                         ui.label("Call Stack");
-                        for frame in self.debug_call_stack.clone() {
+                        for frame in self.debug.call_stack.clone() {
                             ui.label(frame);
                         }
                         if ui.button("Start Debug Session").clicked() {
                             self.active_editor().lsp_status =
                                 "Debug: session requested".to_string();
-                            self.debug_call_stack = vec![
+                            self.debug.call_stack = vec![
                                 "main()".to_string(),
                                 "app::update()".to_string(),
                                 "editor_view::show()".to_string(),
@@ -342,7 +438,7 @@ impl LuxApp {
                         }
                         ui.separator();
                         ui.heading("Task Runner");
-                        for task in self.tasks.clone() {
+                        for task in self.runner.tasks.clone() {
                             ui.horizontal(|ui| {
                                 ui.label(task.name.clone());
                                 if ui.button("Run").clicked() {
@@ -352,26 +448,26 @@ impl LuxApp {
                         }
                         ui.horizontal(|ui| {
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.new_task_name)
+                                egui::TextEdit::singleline(&mut self.runner.new_task_name)
                                     .hint_text("task name"),
                             );
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.new_task_command)
+                                egui::TextEdit::singleline(&mut self.runner.new_task_command)
                                     .hint_text("task command"),
                             );
                         });
                         if ui.button("Add Task").clicked() {
-                            let name = self.new_task_name.trim().to_string();
-                            let cmd = self.new_task_command.trim().to_string();
+                            let name = self.runner.new_task_name.trim().to_string();
+                            let cmd = self.runner.new_task_command.trim().to_string();
                             if !name.is_empty() && !cmd.is_empty() {
-                                self.tasks.push(WorkspaceTask { name, command: cmd });
-                                self.new_task_name.clear();
-                                self.new_task_command.clear();
+                                self.runner.tasks.push(WorkspaceTask { name, command: cmd });
+                                self.runner.new_task_name.clear();
+                                self.runner.new_task_command.clear();
                             }
                         }
                         ui.separator();
                         ui.heading("Run Configurations");
-                        for cfg in self.run_configs.clone() {
+                        for cfg in self.runner.run_configs.clone() {
                             ui.horizontal(|ui| {
                                 ui.label(cfg.name.clone());
                                 if ui.button("Run").clicked() {
@@ -380,70 +476,70 @@ impl LuxApp {
                             });
                         }
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.new_run_config_name)
+                            egui::TextEdit::singleline(&mut self.runner.new_run_config_name)
                                 .hint_text("config name"),
                         );
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.new_run_config_command)
+                            egui::TextEdit::singleline(&mut self.runner.new_run_config_command)
                                 .hint_text("command"),
                         );
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.new_run_config_env)
+                            egui::TextEdit::singleline(&mut self.runner.new_run_config_env)
                                 .hint_text("env overrides: A=1;B=2"),
                         );
                         if ui.button("Add Run Configuration").clicked() {
-                            let name = self.new_run_config_name.trim().to_string();
-                            let command = self.new_run_config_command.trim().to_string();
+                            let name = self.runner.new_run_config_name.trim().to_string();
+                            let command = self.runner.new_run_config_command.trim().to_string();
                             if !name.is_empty() && !command.is_empty() {
-                                self.run_configs.push(RunConfiguration {
+                                self.runner.run_configs.push(RunConfiguration {
                                     name,
                                     command,
-                                    env_overrides: self.new_run_config_env.trim().to_string(),
+                                    env_overrides: self.runner.new_run_config_env.trim().to_string(),
                                 });
-                                self.new_run_config_name.clear();
-                                self.new_run_config_command.clear();
-                                self.new_run_config_env.clear();
+                                self.runner.new_run_config_name.clear();
+                                self.runner.new_run_config_command.clear();
+                                self.runner.new_run_config_env.clear();
                             }
                         }
                     }
                     SidebarTab::Collab => {
                         ui.heading("Live Share");
-                        ui.checkbox(&mut self.collab_enabled, "Enable session");
+                        ui.checkbox(&mut self.collab.enabled, "Enable session");
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.collab_session_id)
+                            egui::TextEdit::singleline(&mut self.collab.session_id)
                                 .hint_text("session id"),
                         );
                         if ui.button("Start/Join Session").clicked() {
-                            if self.collab_session_id.trim().is_empty() {
-                                self.collab_session_id = format!("session-{}", (now_secs() as u64));
+                            if self.collab.session_id.trim().is_empty() {
+                                self.collab.session_id = format!("session-{}", (now_secs() as u64));
                             }
-                            self.collab_enabled = true;
+                            self.collab.enabled = true;
                         }
                         ui.separator();
                         ui.label("Peer cursors");
-                        for peer in self.collab_peer_cursors.clone() {
+                        for peer in self.collab.peer_cursors.clone() {
                             ui.label(peer);
                         }
                         ui.separator();
-                        ui.checkbox(&mut self.collab_review_mode, "Review mode");
+                        ui.checkbox(&mut self.collab.review_mode, "Review mode");
                         ui.add(
-                            egui::TextEdit::singleline(&mut self.collab_note_input)
+                            egui::TextEdit::singleline(&mut self.collab.note_input)
                                 .hint_text("Inline note for current line"),
                         );
                         if ui.button("Add Note").clicked() {
                             if let Some(path) = self.editors[self.active_tab].file_path.clone() {
                                 let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
-                                let note = self.collab_note_input.trim().to_string();
+                                let note = self.collab.note_input.trim().to_string();
                                 if !note.is_empty() {
-                                    self.collab_notes
+                                    self.collab.notes
                                         .entry(path)
                                         .or_default()
                                         .push((line, note));
-                                    self.collab_note_input.clear();
+                                    self.collab.note_input.clear();
                                 }
                             }
                         }
-                        for (path, notes) in self.collab_notes.clone() {
+                        for (path, notes) in self.collab.notes.clone() {
                             for (line, note) in notes {
                                 ui.label(format!("{}:{} {}", path.to_string_lossy(), line, note));
                             }
@@ -473,16 +569,16 @@ impl LuxApp {
 
     pub(super) fn run_terminal_command(&mut self, secondary: bool) {
         let command = if secondary {
-            self.terminal_input_secondary.trim().to_string()
+            self.terminal.input_secondary.trim().to_string()
         } else {
-            self.terminal_input.trim().to_string()
+            self.terminal.input.trim().to_string()
         };
         if command.is_empty() {
             return;
         }
         let profile = self
-            .terminal_profiles
-            .get(self.terminal_profile_idx)
+            .terminal.profiles
+            .get(self.terminal.profile_idx)
             .cloned()
             .unwrap_or(TerminalProfile {
                 name: "Default".to_string(),
@@ -490,10 +586,10 @@ impl LuxApp {
                 theme_hint: "Dark".to_string(),
             });
         if secondary {
-            self.terminal_log_secondary
+            self.terminal.log_secondary
                 .push(format!("[{}] $ {}", profile.name, command));
         } else {
-            self.terminal_log
+            self.terminal.log
                 .push(format!("[{}] $ {}", profile.name, command));
         }
         let target = if secondary {
@@ -510,9 +606,9 @@ impl LuxApp {
             Vec::new(),
         );
         if secondary {
-            self.terminal_input_secondary.clear();
+            self.terminal.input_secondary.clear();
         } else {
-            self.terminal_input.clear();
+            self.terminal.input.clear();
         }
     }
 
@@ -522,7 +618,7 @@ impl LuxApp {
             return;
         };
         let line = self.editors[self.active_tab].cursors[0].pos.line + 1;
-        let set = self.debug_breakpoints.entry(path).or_default();
+        let set = self.debug.breakpoints.entry(path).or_default();
         if !set.insert(line) {
             set.remove(&line);
         }
@@ -621,33 +717,33 @@ impl LuxApp {
             match target {
                 AsyncCommandTarget::TerminalPrimary => {
                     if !stdout.is_empty() {
-                        self.terminal_log.push(stdout.clone());
+                        self.terminal.log.push(stdout.clone());
                         self.push_output_log(stdout);
                     }
                     if !stderr.is_empty() {
-                        self.terminal_log.push(stderr.clone());
+                        self.terminal.log.push(stderr.clone());
                         self.push_output_log(stderr);
                     }
                     if let Some(err) = error {
-                        self.terminal_log.push(format!("error: {err}"));
+                        self.terminal.log.push(format!("error: {err}"));
                         self.push_output_log(format!("Terminal error: {err}"));
                     }
-                    Self::cap_vec(&mut self.terminal_log, 500);
+                    Self::cap_vec(&mut self.terminal.log, 500);
                 }
                 AsyncCommandTarget::TerminalSecondary => {
                     if !stdout.is_empty() {
-                        self.terminal_log_secondary.push(stdout.clone());
+                        self.terminal.log_secondary.push(stdout.clone());
                         self.push_output_log(stdout);
                     }
                     if !stderr.is_empty() {
-                        self.terminal_log_secondary.push(stderr.clone());
+                        self.terminal.log_secondary.push(stderr.clone());
                         self.push_output_log(stderr);
                     }
                     if let Some(err) = error {
-                        self.terminal_log_secondary.push(format!("error: {err}"));
+                        self.terminal.log_secondary.push(format!("error: {err}"));
                         self.push_output_log(format!("Terminal error: {err}"));
                     }
-                    Self::cap_vec(&mut self.terminal_log_secondary, 500);
+                    Self::cap_vec(&mut self.terminal.log_secondary, 500);
                 }
                 AsyncCommandTarget::Task => {
                     if !stdout.is_empty() {

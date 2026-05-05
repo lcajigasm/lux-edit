@@ -47,28 +47,28 @@ impl LuxApp {
             DockPanelTab::Terminal => {
                 ui.horizontal(|ui| {
                     ui.label("Profile");
-                    for (idx, profile) in self.terminal_profiles.iter().enumerate() {
+                    for (idx, profile) in self.terminal.profiles.iter().enumerate() {
                         if ui
                             .selectable_label(
-                                idx == self.terminal_profile_idx,
+                                idx == self.terminal.profile_idx,
                                 format!("{} ({})", profile.name, profile.theme_hint),
                             )
                             .clicked()
                         {
-                            self.terminal_profile_idx = idx;
+                            self.terminal.profile_idx = idx;
                         }
                     }
-                    ui.checkbox(&mut self.terminal_split_panes, "Split");
+                    ui.checkbox(&mut self.terminal.split_panes, "Split");
                 });
                 egui::ScrollArea::vertical()
                     .max_height(160.0)
                     .show(ui, |ui| {
-                        for line in &self.terminal_log {
+                        for line in &self.terminal.log {
                             ui.label(egui::RichText::new(line).monospace().size(11.0));
                         }
                     });
                 let resp = ui.add(
-                    egui::TextEdit::singleline(&mut self.terminal_input)
+                    egui::TextEdit::singleline(&mut self.terminal.input)
                         .hint_text("Run shell command..."),
                 );
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -77,17 +77,17 @@ impl LuxApp {
                 if ui.button("Run").clicked() {
                     self.run_terminal_command(false);
                 }
-                if self.terminal_split_panes {
+                if self.terminal.split_panes {
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .max_height(120.0)
                         .show(ui, |ui| {
-                            for line in &self.terminal_log_secondary {
+                            for line in &self.terminal.log_secondary {
                                 ui.label(egui::RichText::new(line).monospace().size(11.0));
                             }
                         });
                     let resp_secondary = ui.add(
-                        egui::TextEdit::singleline(&mut self.terminal_input_secondary)
+                        egui::TextEdit::singleline(&mut self.terminal.input_secondary)
                             .hint_text("Run in split pane..."),
                     );
                     if resp_secondary.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -102,18 +102,18 @@ impl LuxApp {
             DockPanelTab::Output => {
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.output_filter)
+                        egui::TextEdit::singleline(&mut self.terminal.output_filter)
                             .hint_text("Filter output"),
                     );
                     if ui.button("Copy Visible").clicked() {
                         let visible: String = self
-                            .output_log
+                            .terminal.output_log
                             .iter()
                             .filter(|line| {
-                                self.output_filter.trim().is_empty()
+                                self.terminal.output_filter.trim().is_empty()
                                     || line
                                         .to_lowercase()
-                                        .contains(&self.output_filter.to_lowercase())
+                                        .contains(&self.terminal.output_filter.to_lowercase())
                             })
                             .cloned()
                             .collect::<Vec<_>>()
@@ -124,11 +124,11 @@ impl LuxApp {
                     }
                 });
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for line in self.output_log.clone() {
-                        if !self.output_filter.trim().is_empty()
+                    for line in self.terminal.output_log.clone() {
+                        if !self.terminal.output_filter.trim().is_empty()
                             && !line
                                 .to_lowercase()
-                                .contains(&self.output_filter.to_lowercase())
+                                .contains(&self.terminal.output_filter.to_lowercase())
                         {
                             continue;
                         }
@@ -149,7 +149,7 @@ impl LuxApp {
             DockPanelTab::Problems => {
                 ui.horizontal(|ui| {
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.problems_filter)
+                        egui::TextEdit::singleline(&mut self.terminal.problems_filter)
                             .hint_text("Filter problems"),
                     );
                 });
@@ -175,10 +175,10 @@ impl LuxApp {
                         }
                         let row =
                             format!("Ln {} [{}] {}", diag.line + 1, diag.severity, diag.message);
-                        if !self.problems_filter.trim().is_empty()
+                        if !self.terminal.problems_filter.trim().is_empty()
                             && !row
                                 .to_lowercase()
-                                .contains(&self.problems_filter.to_lowercase())
+                                .contains(&self.terminal.problems_filter.to_lowercase())
                         {
                             continue;
                         }
@@ -620,7 +620,7 @@ impl LuxApp {
         let mut report = String::new();
         report.push_str("# Crash/Triage Bundle\n\n");
         report.push_str("## Recent Output\n");
-        for line in self.output_log.iter().rev().take(300) {
+        for line in self.terminal.output_log.iter().rev().take(300) {
             report.push_str(line);
             report.push('\n');
         }
@@ -661,7 +661,7 @@ impl LuxApp {
                     "message": d.message,
                 }))
                 .collect::<Vec<_>>(),
-            "logs": self.output_log.iter().rev().take(500).cloned().collect::<Vec<_>>(),
+            "logs": self.terminal.output_log.iter().rev().take(500).cloned().collect::<Vec<_>>(),
             "plugins": self.plugins.iter().map(|p| p.name.clone()).collect::<Vec<_>>(),
             "lsp_running": self.lsp_rx.is_some(),
             "safe_mode": self.safe_mode,
@@ -944,11 +944,11 @@ impl LuxApp {
     pub(super) fn collab_state_path(&self) -> PathBuf {
         self.workspace_root
             .join(".lux")
-            .join(format!("collab-{}.json", self.collab_session_id))
+            .join(format!("collab-{}.json", self.collab.session_id))
     }
 
     pub(super) fn sync_collaboration_state(&mut self) {
-        if !self.collab_enabled || self.collab_session_id.trim().is_empty() {
+        if !self.collab.enabled || self.collab.session_id.trim().is_empty() {
             return;
         }
         let path = self.collab_state_path();
@@ -957,7 +957,7 @@ impl LuxApp {
         }
         let current = &self.editors[self.active_tab];
         let payload = serde_json::json!({
-            "session": self.collab_session_id,
+            "session": self.collab.session_id,
             "local": {
                 "file": current.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
                 "line": current.cursors.first().map(|c| c.pos.line + 1).unwrap_or(1),
@@ -982,7 +982,7 @@ impl LuxApp {
                     .and_then(|v| v.get("col"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(1);
-                self.collab_peer_cursors = vec![format!("peer -> {}:{}:{}", file, line, col)];
+                self.collab.peer_cursors = vec![format!("peer -> {}:{}:{}", file, line, col)];
             }
         }
     }
@@ -991,7 +991,7 @@ impl LuxApp {
         let path = self.workspace_root.join(".lux").join("handoff_snapshot.md");
         let mut doc = String::new();
         doc.push_str("# Handoff Snapshot\n\n");
-        doc.push_str(&format!("Session: {}\n\n", self.collab_session_id));
+        doc.push_str(&format!("Session: {}\n\n", self.collab.session_id));
         doc.push_str("## Open Files\n");
         for editor in &self.editors {
             if let Some(path) = &editor.file_path {
@@ -999,7 +999,7 @@ impl LuxApp {
             }
         }
         doc.push_str("\n## Review Notes\n");
-        for (path, notes) in &self.collab_notes {
+        for (path, notes) in &self.collab.notes {
             for (line, note) in notes {
                 doc.push_str(&format!("- {}:{} {}\n", path.to_string_lossy(), line, note));
             }
@@ -1064,8 +1064,8 @@ impl LuxApp {
     }
 
     pub(super) fn push_output_log(&mut self, line: String) {
-        self.output_log.push(redact_secrets(&line));
-        Self::cap_vec(&mut self.output_log, 500);
+        self.terminal.output_log.push(redact_secrets(&line));
+        Self::cap_vec(&mut self.terminal.output_log, 500);
     }
 
     pub(super) fn cap_vec(vec: &mut Vec<String>, max_len: usize) {
@@ -1156,9 +1156,9 @@ impl LuxApp {
     pub(super) fn handle_command(&mut self, cmd: CommandId) {
         self.log_event("command", LogLevel::Debug, &format!("{:?}", cmd));
         if self.telemetry_opt_in {
-            self.output_log.push(format!("telemetry.command {:?}", cmd));
-            if self.output_log.len() > 400 {
-                self.output_log.drain(0..(self.output_log.len() - 400));
+            self.terminal.output_log.push(format!("telemetry.command {:?}", cmd));
+            if self.terminal.output_log.len() > 400 {
+                self.terminal.output_log.drain(0..(self.terminal.output_log.len() - 400));
             }
         }
         match cmd {
@@ -1191,14 +1191,14 @@ impl LuxApp {
             }
             CommandId::StartDebugSession => {
                 self.active_editor().lsp_status = "Debug: session requested".to_string();
-                self.debug_call_stack = vec![
+                self.debug.call_stack = vec![
                     "main()".to_string(),
                     "app::update()".to_string(),
                     "editor_view::show()".to_string(),
                 ];
             }
             CommandId::RunTask => {
-                if let Some(task) = self.tasks.first().cloned() {
+                if let Some(task) = self.runner.tasks.first().cloned() {
                     self.run_workspace_task(&task.command);
                     self.active_editor().lsp_status = format!("Task run: {}", task.name);
                 } else {

@@ -212,6 +212,81 @@ pub(super) struct ShortcutSpec {
     alt: bool,
 }
 
+#[derive(Default)]
+pub(super) struct DebugState {
+    breakpoints: HashMap<PathBuf, HashSet<usize>>,
+    watch_input: String,
+    watches: Vec<String>,
+    call_stack: Vec<String>,
+}
+
+#[derive(Default)]
+pub(super) struct CollabState {
+    enabled: bool,
+    session_id: String,
+    review_mode: bool,
+    note_input: String,
+    notes: HashMap<PathBuf, Vec<(usize, String)>>,
+    peer_cursors: Vec<String>,
+}
+
+#[derive(Default)]
+pub(super) struct RunnerState {
+    tasks: Vec<WorkspaceTask>,
+    new_task_name: String,
+    new_task_command: String,
+    run_configs: Vec<RunConfiguration>,
+    new_run_config_name: String,
+    new_run_config_command: String,
+    new_run_config_env: String,
+}
+
+pub(super) struct TerminalState {
+    profiles: Vec<TerminalProfile>,
+    profile_idx: usize,
+    split_panes: bool,
+    input_secondary: String,
+    log_secondary: Vec<String>,
+    input: String,
+    log: Vec<String>,
+    output_log: Vec<String>,
+    output_filter: String,
+    problems_filter: String,
+}
+
+impl Default for TerminalState {
+    fn default() -> Self {
+        Self {
+            profiles: vec![
+                TerminalProfile {
+                    name: "Default".to_string(),
+                    shell: "sh".to_string(),
+                    theme_hint: "Dark".to_string(),
+                },
+                TerminalProfile {
+                    name: "Bash".to_string(),
+                    shell: "bash".to_string(),
+                    theme_hint: "Classic".to_string(),
+                },
+                TerminalProfile {
+                    name: "Zsh".to_string(),
+                    shell: "zsh".to_string(),
+                    theme_hint: "Neon".to_string(),
+                },
+            ],
+            profile_idx: 0,
+            split_panes: false,
+            input_secondary: String::new(),
+            log_secondary: Vec::new(),
+            input: String::new(),
+            log: Vec::new(),
+            output_log: Vec::new(),
+            output_filter: String::new(),
+            problems_filter: String::new(),
+        }
+    }
+}
+
 pub struct LuxApp {
     pub editors: Vec<Editor>,
     pub active_tab: usize,
@@ -253,22 +328,14 @@ pub struct LuxApp {
     refactor_preview: Option<RefactorPreview>,
     sidebar_files: Vec<PathBuf>,
     sidebar_last_scan: f64,
+    sidebar_expanded_dirs: HashSet<PathBuf>,
     quick_open_query: String,
     recent_workspaces: Vec<PathBuf>,
     file_ops_target: String,
     file_ops_message: String,
     deleted_file_backup: Option<(PathBuf, PathBuf)>,
-    debug_breakpoints: HashMap<PathBuf, HashSet<usize>>,
-    debug_watch_input: String,
-    debug_watches: Vec<String>,
-    debug_call_stack: Vec<String>,
-    tasks: Vec<WorkspaceTask>,
-    new_task_name: String,
-    new_task_command: String,
-    run_configs: Vec<RunConfiguration>,
-    new_run_config_name: String,
-    new_run_config_command: String,
-    new_run_config_env: String,
+    debug: DebugState,
+    runner: RunnerState,
     diagnostics_show_error: bool,
     diagnostics_show_warning: bool,
     diagnostics_show_info: bool,
@@ -280,12 +347,7 @@ pub struct LuxApp {
     lint_folder_overrides: HashMap<PathBuf, HashMap<String, String>>,
     lint_override_rule_input: String,
     lint_override_value_input: String,
-    collab_enabled: bool,
-    collab_session_id: String,
-    collab_review_mode: bool,
-    collab_note_input: String,
-    collab_notes: HashMap<PathBuf, Vec<(usize, String)>>,
-    collab_peer_cursors: Vec<String>,
+    collab: CollabState,
     workspace_roots: Vec<PathBuf>,
     new_workspace_root_input: String,
     project_gitignore_patterns: Vec<String>,
@@ -324,16 +386,7 @@ pub struct LuxApp {
     dock_tab: DockPanelTab,
     dock_side: DockSide,
     dock_size: f32,
-    terminal_profiles: Vec<TerminalProfile>,
-    terminal_profile_idx: usize,
-    terminal_split_panes: bool,
-    terminal_input_secondary: String,
-    terminal_log_secondary: Vec<String>,
-    terminal_input: String,
-    terminal_log: Vec<String>,
-    output_log: Vec<String>,
-    output_filter: String,
-    problems_filter: String,
+    terminal: TerminalState,
     workspace_fonts: HashMap<PathBuf, WorkspaceFontSettings>,
     folder_font_overrides: HashMap<PathBuf, WorkspaceFontSettings>,
     folder_override_path_input: String,
@@ -445,35 +498,33 @@ impl LuxApp {
             refactor_preview: None,
             sidebar_files: Vec::new(),
             sidebar_last_scan: 0.0,
+            sidebar_expanded_dirs: HashSet::new(),
             quick_open_query: String::new(),
             recent_workspaces,
             file_ops_target: String::new(),
             file_ops_message: String::new(),
             deleted_file_backup: None,
-            debug_breakpoints: HashMap::new(),
-            debug_watch_input: String::new(),
-            debug_watches: Vec::new(),
-            debug_call_stack: vec!["main()".to_string()],
-            tasks: vec![
-                WorkspaceTask {
-                    name: "build".to_string(),
-                    command: "cargo build".to_string(),
-                },
-                WorkspaceTask {
-                    name: "test".to_string(),
-                    command: "cargo test".to_string(),
-                },
-                WorkspaceTask {
-                    name: "lint".to_string(),
-                    command: "cargo clippy".to_string(),
-                },
-            ],
-            new_task_name: String::new(),
-            new_task_command: String::new(),
-            run_configs: Vec::new(),
-            new_run_config_name: String::new(),
-            new_run_config_command: String::new(),
-            new_run_config_env: String::new(),
+            debug: DebugState {
+                call_stack: vec!["main()".to_string()],
+                ..Default::default()
+            },
+            runner: RunnerState {
+                tasks: vec![
+                    WorkspaceTask {
+                        name: "build".to_string(),
+                        command: "cargo build".to_string(),
+                    },
+                    WorkspaceTask {
+                        name: "test".to_string(),
+                        command: "cargo test".to_string(),
+                    },
+                    WorkspaceTask {
+                        name: "lint".to_string(),
+                        command: "cargo clippy".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
             diagnostics_show_error: true,
             diagnostics_show_warning: true,
             diagnostics_show_info: true,
@@ -485,12 +536,7 @@ impl LuxApp {
             lint_folder_overrides: HashMap::new(),
             lint_override_rule_input: String::new(),
             lint_override_value_input: String::new(),
-            collab_enabled: false,
-            collab_session_id: String::new(),
-            collab_review_mode: false,
-            collab_note_input: String::new(),
-            collab_notes: HashMap::new(),
-            collab_peer_cursors: Vec::new(),
+            collab: CollabState::default(),
             workspace_roots: vec![workspace.clone()],
             new_workspace_root_input: String::new(),
             project_gitignore_patterns: vec!["target/**".to_string()],
@@ -533,32 +579,7 @@ impl LuxApp {
             dock_tab: DockPanelTab::Terminal,
             dock_side: DockSide::Bottom,
             dock_size: 180.0,
-            terminal_profiles: vec![
-                TerminalProfile {
-                    name: "Default".to_string(),
-                    shell: "sh".to_string(),
-                    theme_hint: "Dark".to_string(),
-                },
-                TerminalProfile {
-                    name: "Bash".to_string(),
-                    shell: "bash".to_string(),
-                    theme_hint: "Classic".to_string(),
-                },
-                TerminalProfile {
-                    name: "Zsh".to_string(),
-                    shell: "zsh".to_string(),
-                    theme_hint: "Neon".to_string(),
-                },
-            ],
-            terminal_profile_idx: 0,
-            terminal_split_panes: false,
-            terminal_input_secondary: String::new(),
-            terminal_log_secondary: Vec::new(),
-            terminal_input: String::new(),
-            terminal_log: Vec::new(),
-            output_log: Vec::new(),
-            output_filter: String::new(),
-            problems_filter: String::new(),
+            terminal: TerminalState::default(),
             workspace_fonts: {
                 let mut map = HashMap::new();
                 map.insert(workspace.clone(), workspace_font_setting);
@@ -1238,7 +1259,7 @@ impl eframe::App for LuxApp {
                     ui.separator();
                     ui.label("Recent Output Logs");
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for line in self.output_log.iter().rev().take(200) {
+                        for line in self.terminal.output_log.iter().rev().take(200) {
                             ui.label(egui::RichText::new(line).monospace().size(11.0));
                         }
                     });
