@@ -182,7 +182,10 @@ fn draw_icon_explorer(p: &egui::Painter, rect: egui::Rect, color: egui::Color32)
     for i in 0..3_i32 {
         let y = c.y - 1.0 + i as f32 * 3.5;
         p.line_segment(
-            [egui::Pos2::new(c.x - 3.5, y), egui::Pos2::new(c.x + 2.5, y)],
+            [
+                egui::Pos2::new(c.x - 3.5, y),
+                egui::Pos2::new(c.x + 2.5, y),
+            ],
             thin,
         );
     }
@@ -304,9 +307,10 @@ impl LuxApp {
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                    let resp = activity_icon(ui, false, "Manage", |p, rect, color| {
-                        draw_icon_settings(p, rect, color);
-                    });
+                    let resp =
+                        activity_icon(ui, false, "Manage", |p, rect, color| {
+                            draw_icon_settings(p, rect, color);
+                        });
                     if resp.clicked() {
                         self.show_help_window = true;
                     }
