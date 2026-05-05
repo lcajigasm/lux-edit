@@ -33,9 +33,9 @@ impl LuxApp {
                                     let text = title.clone();
 
                                     let text_color = if is_active {
-                                        egui::Color32::WHITE
+                                        egui::Color32::from_rgb(230, 230, 245)
                                     } else {
-                                        egui::Color32::from_rgb(180, 180, 180)
+                                        egui::Color32::from_rgb(120, 120, 150)
                                     };
 
                                     // Calculate Width
@@ -105,7 +105,7 @@ impl LuxApp {
                                         painter.circle_filled(
                                             egui::Pos2::new(text_x + 3.0, rect.center().y),
                                             2.5,
-                                            egui::Color32::from_rgb(255, 165, 90), // Orange
+                                            ACCENT_COLOR,
                                         );
                                         text_x += 14.0;
                                     } else {
@@ -259,7 +259,7 @@ impl LuxApp {
                             .map(|pos| primary_rect.contains(pos))
                             .unwrap_or(false);
                         let primary_bg = if dragging && primary_hovered {
-                            egui::Color32::from_rgb(0, 122, 204)
+                            ACCENT_COLOR
                         } else {
                             TAB_INACTIVE_BG
                         };
@@ -283,7 +283,7 @@ impl LuxApp {
                             .map(|pos| secondary_rect.contains(pos))
                             .unwrap_or(false);
                         let secondary_bg = if dragging && secondary_hovered {
-                            egui::Color32::from_rgb(0, 122, 204)
+                            ACCENT_COLOR
                         } else {
                             TAB_INACTIVE_BG
                         };

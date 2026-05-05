@@ -10,9 +10,9 @@ impl LuxApp {
         ui.add_space(8.0);
         // Floating panel look
         egui::Frame::none()
-            .fill(egui::Color32::from_rgb(37, 37, 38))
-            .rounding(egui::Rounding::same(4.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 122, 204))) // Active border
+            .fill(egui::Color32::from_rgb(20, 20, 30))
+            .rounding(egui::Rounding::same(6.0))
+            .stroke(egui::Stroke::new(1.0, ACCENT_COLOR))
             .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -80,9 +80,9 @@ impl LuxApp {
         if self.show_replace {
             ui.add_space(2.0);
             egui::Frame::none()
-                .fill(egui::Color32::from_rgb(37, 37, 38))
-                .rounding(egui::Rounding::same(4.0))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 60)))
+                .fill(egui::Color32::from_rgb(20, 20, 30))
+                .rounding(egui::Rounding::same(6.0))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 58)))
                 .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -130,9 +130,9 @@ impl LuxApp {
 
         ui.add_space(8.0);
         egui::Frame::none()
-            .fill(egui::Color32::from_rgb(37, 37, 38))
-            .rounding(egui::Rounding::same(4.0))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 122, 204)))
+            .fill(egui::Color32::from_rgb(20, 20, 30))
+            .rounding(egui::Rounding::same(6.0))
+            .stroke(egui::Stroke::new(1.0, ACCENT_COLOR))
             .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {

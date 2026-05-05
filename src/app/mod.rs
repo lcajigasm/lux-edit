@@ -22,24 +22,26 @@ mod search_bars;
 mod sidebar;
 mod tabs;
 
-pub(super) const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(36, 37, 38);
-pub(super) const MENU_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 47);
+// --- Lux Dark palette ---
+// Base: deep indigo-black  Accent: warm amber gold (Lux = light)
+pub(super) const WINDOW_BG: egui::Color32 = egui::Color32::from_rgb(18, 18, 27);
+pub(super) const MENU_BG: egui::Color32 = egui::Color32::from_rgb(22, 22, 33);
 pub(super) const MENU_STROKE: egui::Stroke = egui::Stroke {
     width: 1.0,
-    color: egui::Color32::from_rgb(65, 65, 67),
+    color: egui::Color32::from_rgb(40, 40, 58),
 };
-pub(super) const TAB_BAR_BG: egui::Color32 = egui::Color32::from_rgb(25, 25, 26);
-pub(super) const TAB_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 38); // Should match generic editor bg
-pub(super) const TAB_INACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(45, 45, 48);
-pub(super) const TAB_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(50, 50, 53);
-pub(super) const TAB_HEIGHT: f32 = 32.0; // Slightly taller for modern feel
+pub(super) const TAB_BAR_BG: egui::Color32 = egui::Color32::from_rgb(13, 13, 20);
+pub(super) const TAB_ACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(18, 18, 27);
+pub(super) const TAB_INACTIVE_BG: egui::Color32 = egui::Color32::from_rgb(22, 22, 33);
+pub(super) const TAB_HOVER_BG: egui::Color32 = egui::Color32::from_rgb(28, 28, 42);
+pub(super) const TAB_HEIGHT: f32 = 33.0;
 pub(super) const TAB_MIN_WIDTH: f32 = 120.0;
 pub(super) const TAB_MAX_WIDTH: f32 = 220.0;
 pub(super) const TAB_PADDING_X: f32 = 12.0;
 pub(super) const TAB_CLOSE_SIZE: f32 = 14.0;
-pub(super) const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(0, 122, 204); // VS Code-ish blue active line
-pub(super) const ACTIVITY_BAR_BG: egui::Color32 = egui::Color32::from_rgb(43, 43, 43);
-pub(super) const SIDEBAR_BG: egui::Color32 = egui::Color32::from_rgb(37, 37, 38);
+pub(super) const ACCENT_COLOR: egui::Color32 = egui::Color32::from_rgb(240, 180, 66); // amber gold
+pub(super) const ACTIVITY_BAR_BG: egui::Color32 = egui::Color32::from_rgb(13, 13, 20);
+pub(super) const SIDEBAR_BG: egui::Color32 = egui::Color32::from_rgb(16, 16, 24);
 
 // GitInfo moved to ui::status_bar
 
@@ -476,7 +478,7 @@ impl LuxApp {
             pending_delete_confirm: None,
             closed_tabs: Vec::new(),
             dragging_tab: None,
-            editor_theme: EditorThemeKind::Monokai,
+            editor_theme: EditorThemeKind::LuxDark,
             git_info: None,
             git_last_check: 0.0,
             show_sidebar: true,

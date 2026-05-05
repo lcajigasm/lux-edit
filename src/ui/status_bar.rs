@@ -6,8 +6,9 @@ use crate::syntax::SyntaxHighlighter;
 const BAR_HEIGHT: f32 = 22.0;
 const BAR_ITEM_HOVER_ALPHA: u8 = 30;
 
-const BAR_BG: egui::Color32 = egui::Color32::from_rgb(0, 122, 204); // VS Code Blue for status bar
-const BAR_TEXT: egui::Color32 = egui::Color32::WHITE;
+const BAR_BG: egui::Color32 = egui::Color32::from_rgb(11, 11, 18);
+const BAR_TEXT: egui::Color32 = egui::Color32::from_rgb(155, 155, 180);
+const BAR_ACCENT_TEXT: egui::Color32 = egui::Color32::from_rgb(240, 180, 66);
 
 #[derive(Clone, Debug, Default)]
 pub struct GitInfo {
@@ -52,9 +53,7 @@ pub fn show(
             status.push_str(&format!(" ↓{}", info.behind));
         }
 
-        status_item(&mut ui, &format!("\u{E0A0} {}", status)); //  branch symbol (requires nerd font, fallback text)
-                                                               // Note: \u{E0A0} is Nerd Font git branch.
-                                                               // If not available, we can use "git: "
+        status_item_accent(&mut ui, &format!("\u{E0A0} {}", status));
     }
     let mut added = 0usize;
     let mut modified = 0usize;
@@ -289,10 +288,15 @@ pub fn show(
 }
 
 fn status_item(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    let font = egui::FontId::proportional(12.0);
-    let text_color = BAR_TEXT;
+    status_item_colored(ui, text, BAR_TEXT)
+}
 
-    // Calculate size
+fn status_item_accent(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    status_item_colored(ui, text, BAR_ACCENT_TEXT)
+}
+
+fn status_item_colored(ui: &mut egui::Ui, text: &str, text_color: egui::Color32) -> egui::Response {
+    let font = egui::FontId::proportional(12.0);
     let padding = egui::vec2(10.0, 0.0);
     let galley = ui
         .painter()
