@@ -818,6 +818,7 @@ impl LuxApp {
                 "Dark" => EditorThemeKind::Dark,
                 "Light" => EditorThemeKind::Light,
                 "Solarized Dark" => EditorThemeKind::SolarizedDark,
+                "Monokai" => EditorThemeKind::Monokai,
                 _ => EditorThemeKind::LuxDark,
             };
         }
